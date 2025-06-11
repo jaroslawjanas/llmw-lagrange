@@ -15,6 +15,7 @@ dependencies:
   - conda-forge::numpy=2.2.5
   - conda-forge::sentencepiece=0.2.0
   - conda-forge::pillow=11.2.1 # Some models might need this for AutoProcessor
+  - conda-forge::galois=0.4.6 # For Galois Field
   - pip
   - pip:
     - accelerate
