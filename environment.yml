@@ -2,21 +2,20 @@ name: llmw-lagrange
 channels:
   - pytorch
   - nvidia
-  - huggingface
   - conda-forge
   - defaults
 dependencies:
   - python=3.10
   - pytorch::pytorch=2.5.1
-  - pytorch::pytorch-cuda=12.4 # 11.8
-  - conda-forge::transformers=4.51.3
-  - huggingface::datasets=3.6.0
-  - conda-forge::tqdm=4.67.1
-  - conda-forge::numpy=2.2.5
-  - conda-forge::sentencepiece=0.2.0
-  - conda-forge::pillow=11.2.1 # Some models might need this for AutoProcessor
-  - conda-forge::galois=0.4.6 # For Galois Field
+  - pytorch::pytorch-cuda=11.8 # 12.4
+  - transformers=4.51.3
+  - datasets=3.6.0
+  - tqdm=4.67.1
+  - numpy>=2, <3
+  - sentencepiece=0.2.0
+  - pillow>=11, <12 # Some models might need this for AutoProcessor
+  - galois=0.4.6
   - pip
   - pip:
-    - accelerate
-    - huggingface_hub
+    - accelerate==1.7.0
+    - huggingface_hub==0.33.0
