@@ -9,6 +9,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=100, help="Maximum tokens to generate")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
+    parser.add_argument("--n", type=float, default=6.0, help="Size of the field and the blocks to be encoded")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
     parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"], 
