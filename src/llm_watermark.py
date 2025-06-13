@@ -267,7 +267,7 @@ class LLMWatermarker:
         # Get green and red tokens as tensors using the deterministic hash of previous tokens
         # Example: based on token_window [101, 256, 512], this might return
         # green_tokens as tensor([42, 900, 5, ...]) and red_tokens (which we don't use here)
-        green_tokens, _ = self._get_red_green_tokens(token_window)
+        green_tokens, red_tokens = self._get_red_green_tokens(token_window)
         
         # Clone logits for modification to avoid affecting the original tensor
         # This creates a new tensor with the same values that we can safely modify
@@ -318,26 +318,13 @@ class LLMWatermarker:
 
         # Initialize mask for green/red tokens
         green_red_mask = []
-
-        # Initialize timing variables
-        prompt_formatting_duration = 0.0
-        tokenization_duration = 0.0
-        logits_generation_time = 0.0
-        modify_logits_time = 0.0
-        sampling_time = 0.0
         
         # Format the prompt for the specific model
-        start_time = time.time()
         formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer)
-        end_time = time.time()
-        prompt_formatting_duration = end_time - start_time
         
         # Tokenize the formatted prompt
-        start_time = time.time()
         input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="pt").to(self.device)
-        end_time = time.time()
-        tokenization_duration = end_time - start_time
-        
+
         # Store generated ids
         generated_ids = input_ids.clone()[0].tolist()
         
@@ -372,7 +359,6 @@ class LLMWatermarker:
                     cache_position = self.context_window - 1
             
             # Get logits from the model with K/V caching
-            start_time = time.time()
             with torch.no_grad():
                 outputs = self.model(
                     model_input_ids, 
@@ -382,8 +368,6 @@ class LLMWatermarker:
                 logits = outputs.logits[:, -1:, :]  # Get logits of last token
                 past_key_values = outputs.past_key_values  # Update cache
                 cache_position += model_input_ids.shape[1]  # Update position
-            end_time = time.time()
-            logits_generation_time += end_time - start_time
             
             # Create a window of previous tokens for hashing
             if len(generated_ids) >= self.hash_window:
@@ -392,10 +376,7 @@ class LLMWatermarker:
                 token_window = generated_ids
             
             # Modify logits with watermark using the token window
-            start_time = time.time()
             modified_logits = self._modify_logits(logits, token_window)
-            end_time = time.time()
-            modify_logits_time += end_time - start_time
             
             # Apply temperature if set
             if self.temperature > 0:
@@ -406,15 +387,12 @@ class LLMWatermarker:
             probs = torch.nn.functional.softmax(modified_logits, dim=-1)
             
             # Token sampling based on temperature
-            start_time = time.time()
             if self.temperature == 0 or self.temperature < 1e-6:
                 # Greedy sampling (select token with highest probability)
                 next_token_id = torch.argmax(probs, dim=-1).item()
             else:
                 # Sample from the distribution
                 next_token_id = torch.multinomial(probs.squeeze(), 1).item()
-            end_time = time.time()
-            sampling_time += end_time - start_time
             
             # Track whether the selected token was from the green or red list for watermark statistics
             # Get the current division of tokens into green and red based on previous tokens
@@ -449,48 +427,8 @@ class LLMWatermarker:
             # Check if we've reached an EOS token
             if next_token_id == self.tokenizer.eos_token_id:
                 break
-                
-        # Record end time for total duration
-        total_end_time = time.time()
-        total_duration = total_end_time - total_start_time
 
         # Decode and return the generated text
         generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-        
-        # Compile statistics
-        stats = {
-            "green_tokens": self.green_tokens_selected,
-            "red_tokens": self.red_tokens_selected,
-            "total_tokens": self.green_tokens_selected + self.red_tokens_selected,
-            "green_ratio": self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
-        }
 
-        # Calculate time per token
-        total_tokens = stats['total_tokens']
-        if total_tokens > 0:
-            prompt_formatting_per_token = prompt_formatting_duration / total_tokens
-            tokenization_per_token = tokenization_duration / total_tokens
-            logits_generation_per_token = logits_generation_time / total_tokens
-            modify_logits_per_token = modify_logits_time / total_tokens
-            sampling_per_token = sampling_time / total_tokens
-            total_per_token = total_duration / total_tokens
-        else:
-            prompt_formatting_per_token = 0.0
-            tokenization_per_token = 0.0
-            logits_generation_per_token = 0.0
-            modify_logits_per_token = 0.0
-            sampling_per_token = 0.0
-            total_per_token = 0.0
-
-        # Print timing summary
-        print("\n--- Timing Summary (s) ---")
-        print(f"{'':<30} {'total':>10}  |  {'per token'}")
-        print(f"{'prompt formatting:':<30} {prompt_formatting_duration:>10.2f}  |  {prompt_formatting_per_token:.4f}")
-        print(f"{'tokenization:':<30} {tokenization_duration:>10.2f}  |  {tokenization_per_token:.4f}")
-        print(f"{'logits generation:':<30} {logits_generation_time:>10.2f}  |  {logits_generation_per_token:.4f}")
-        print(f"{'modify logits (watermarking):':<30} {modify_logits_time:>10.2f}  |  {modify_logits_per_token:.4f}")
-        print(f"{'sampling:':<30} {sampling_time:>10.2f}  |  {sampling_per_token:.4f}")
-        print(f"{'total time:':<30} {total_duration:>10.2f}  |  {total_per_token:.4f}")
-        print("----------------------\n")
-
-        return generated_text, stats, green_red_mask
+        return generated_text, green_red_mask
