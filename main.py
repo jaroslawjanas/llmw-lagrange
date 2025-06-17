@@ -1,5 +1,6 @@
 import argparse
-
+import galois
+import secrets
 import src.paths as paths
 
 
@@ -9,7 +10,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=100, help="Maximum tokens to generate")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
-    parser.add_argument("--n", type=float, default=6.0, help="Size of the field and the blocks to be encoded")
+    parser.add_argument("--n", type=int, default=12, help="Size of the field and the blocks to be encoded")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
     parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"], 
@@ -26,6 +27,24 @@ def main():
     # Set global cache
     paths.set_cache_dir(args.cache_dir)
     paths.ensure_directories()
+
+    # Create a Galois field of size 2^n
+    field_size = 2 ** args.n
+    gf = galois.GF(field_size)
+    
+    # Generate two random numbers in the Galois field
+    a0 = gf.Random()
+    a1 = gf.Random()
+    print(f"Generated random numbers in GF(2^{args.n}): a0 = {a0}, a1 = {a1}")
+    print(f"K = {a0}|{a1}")
+    
+    # Create an anonymous function y = x * a1 + a0
+    line_fnc = lambda x: x * a1 + a0
+    
+    # Generate a 64-bit secret key outside of the Galois field
+    secret_key = secrets.token_hex(8)  # 8 bytes = 64 bits, displayed as 16 hexadecimal characters
+    print(f"Generated 64-bit secret key: {secret_key}")
+
 
     # Determine device
     device = "cpu" if args.no_cuda else None
