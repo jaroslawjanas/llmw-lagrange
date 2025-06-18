@@ -2,7 +2,9 @@ import argparse
 import galois
 import secrets
 import src.paths as paths
-
+import random
+import numpy as np
+import torch
 
 def main():
     parser = argparse.ArgumentParser(description="LLM Text Watermarking based on Lagrange Interpolation")
@@ -10,7 +12,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=100, help="Maximum tokens to generate")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
-    parser.add_argument("--n", type=int, default=12, help="Size of the field and the blocks to be encoded")
+    parser.add_argument("--n", type=int, default=8, help="Size of the field and the blocks to be encoded")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--prompt", type=str, help="Custom prompt (uses random essay from dataset if not provided)")
     parser.add_argument("--dataset", type=str, nargs=4, default=["ChristophSchuhmann/essays-with-instructions", "default", "train", "instructions"], 
@@ -28,6 +30,13 @@ def main():
     paths.set_cache_dir(args.cache_dir)
     paths.ensure_directories()
 
+    # Initialize random seeds
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+        
     # Create a Galois field of size 2^n
     field_size = 2 ** args.n
     gf = galois.GF(field_size)
@@ -48,6 +57,41 @@ def main():
 
     # Determine device
     device = "cpu" if args.no_cuda else None
+
+    # Import and test the watermarker
+    from src.llm_watermark import LLMWatermarker
+    
+    # Create watermarker instance
+    watermarker = LLMWatermarker(
+        model_name=args.model,
+        secret_key=secret_key,
+        line_fnc=line_fnc,
+        n=args.n,
+        gf=gf,
+        green_list_fraction=args.green_fraction,
+        bias=args.bias,
+        seed=args.seed,
+        device=device,
+        context_window=args.context_window,
+        temperature=args.temperature,
+        hash_window=args.hash_window
+    )
+    
+    # Test with a simple prompt
+    test_prompt = args.prompt if args.prompt else "The quick brown fox"
+    print(f"\nGenerating text with watermark for prompt: '{test_prompt}'")
+    
+    generated_text, statistics, watermark_blocks = watermarker.generate_text(
+        prompt=test_prompt,
+        max_new_tokens=args.max_tokens,
+        verbose=True
+    )
+    
+    print(f"\nGenerated text:\n{generated_text}")
+    print(f"\nStatistics: {statistics}")
+    print(f"\nWatermark blocks info:")
+    for i, block in enumerate(watermark_blocks):
+        print(f"  Block {i}: x={block['x']}, y={block['y']}, bits={block['y_bits']}")
 
 
 if __name__ == "__main__":

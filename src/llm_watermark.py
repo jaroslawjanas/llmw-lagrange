@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-LLM Watermarking Implementation based on Kirchenbauer et al., 2023
+LLM Watermarking Implementation based on Lagrange Interpolation
 https://arxiv.org/abs/2301.10226
 
-This script implements the red-green token watermarking technique with greedy sampling.
-Green tokens are used to encode
+This script implements the Lagrange interpolation watermarking technique for LLM-generated text.
 """
 
 import hashlib
@@ -30,6 +29,10 @@ class LLMWatermarker:
     def __init__(
         self,
         model_name: str,
+        secret_key: str,
+        line_fnc: callable,
+        n: int,
+        gf: object,
         green_list_fraction: float = 0.5,
         bias: float = 6.0,
         seed: int = 4242,
@@ -44,6 +47,10 @@ class LLMWatermarker:
         
         Args:
             model_name: HuggingFace model identifier
+            secret_key: Secret key for watermarking
+            line_fnc: Function for Lagrange interpolation f(x) = a0 + a1*x
+            n: Field size parameter (GF(2^n))
+            gf: Galois field instance GF(2^n)
             green_list_fraction: Fraction of tokens to include in green list (default: 0.5)
             bias: Logit bias to apply to green tokens (default: 6.0)
             seed: Random seed for reproducibility
@@ -54,6 +61,10 @@ class LLMWatermarker:
             hash_window: Number of previous tokens to hash together (default: 1)
         """
         self.model_name = model_name
+        self.secret_key = secret_key
+        self.line_fnc = line_fnc
+        self.n = n
+        self.gf = gf
         self.green_list_fraction = green_list_fraction
         self.bias = bias
         self.seed = seed
@@ -70,19 +81,8 @@ class LLMWatermarker:
             
         print(f"Using device: {self.device}")
         
-        # Initialize random seeds
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-            
         # Load model and tokenizer
         self._load_model_and_tokenizer()
-        
-        # Stats
-        self.green_tokens_selected = 0
-        self.red_tokens_selected = 0
         
     def _load_model_and_tokenizer(self):
         """Load the model and tokenizer."""
@@ -132,6 +132,49 @@ class LLMWatermarker:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             
+    def _hash_to_gf_element(self, token_id: int, secret_key: str) -> object:
+        """
+        Hash a token ID and secret key to produce a GF(2^n) element.
+        
+        Args:
+            token_id: Token ID to hash
+            secret_key: Secret key for watermarking
+            
+        Returns:
+            Element in GF(2^n)
+        """
+        # Create hash input by concatenating token ID and secret key
+        hash_input = f"{token_id}-{secret_key}"
+        hash_object = hashlib.sha256(hash_input.encode())
+        hash_bytes = hash_object.digest()
+        
+        # Take first n bits from the hash
+        # Convert bytes to integer, then take modulo 2^n
+        hash_int = int.from_bytes(hash_bytes[:4], byteorder='big')  # Use first 4 bytes
+        hash_value = hash_int % (2 ** self.n)
+        
+        # Convert to GF(2^n) element
+        return self.gf(hash_value)
+    
+    def _gf_to_binary(self, gf_element: object) -> List[int]:
+        """
+        Convert a GF(2^n) element to its n-bit binary representation.
+        
+        Args:
+            gf_element: Element in GF(2^n)
+            
+        Returns:
+            List of n bits (0s and 1s)
+        """
+        # Get the integer representation of the field element
+        int_value = int(gf_element)
+        
+        # Convert to binary and pad to n bits
+        binary_str = format(int_value, f'0{self.n}b')
+        
+        # Convert to list of integers
+        return [int(bit) for bit in binary_str]
+            
     def _trim_past_key_values(self, past_key_values: Tuple, trim_amount: int) -> Tuple:
         """
         Trim the K/V cache by removing the oldest entries.
@@ -169,30 +212,25 @@ class LLMWatermarker:
         
         return tuple(trimmed_past)
         
-    def _get_red_green_tokens(self, token_ids: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_red_green_tokens(self, token_id: int, secret_key: str) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Generate red and green token lists based on the hash of previous tokens.
-        This creates a deterministic division of the vocabulary into "green" tokens
-        (which receive a bias during generation) and "red" tokens (which don't).
+        Generate red and green token lists based on the hash of a token and secret key.
+        This creates a deterministic division of the vocabulary into "green" and "red" tokens.
         
         Args:
-            token_ids: List of token IDs to hash (e.g., [101, 256, 512])
+            token_id: Single token ID to hash
+            secret_key: Secret key for watermarking
             
         Returns:
             Tuple of (green_tokens, red_tokens) as tensors on the device
         """
-        # Convert token_ids list to a PyTorch tensor for efficient processing
-        # Example: if token_ids is [101, 256, 512], token_ids_tensor becomes tensor([101, 256, 512])
-        token_ids_tensor = torch.tensor(token_ids, dtype=torch.int64)
-        
-        # Create a hash from the specified window of tokens by joining them with hyphens
-        # Example: if token_ids_tensor is tensor([101, 256, 512]), hash_input becomes "101-256-512"
-        hash_input = "".join([str(tid.item()) + "-" for tid in token_ids_tensor]).rstrip("-")
+        # Create a hash from the token ID and secret key
+        hash_input = f"{token_id}-{secret_key}"
         hash_object = hashlib.sha256(hash_input.encode())
         hash_hex = hash_object.hexdigest()
         
         # Convert the hexadecimal hash to a 32-bit integer for use as a random seed
-        # This ensures deterministic outcomes for the same input token sequence
+        # This ensures deterministic outcomes for the same input token and secret key
         hash_seed = int(hash_hex, 16) % (2**32)
         
         # Get the total number of tokens in the model's vocabulary
@@ -234,18 +272,20 @@ class LLMWatermarker:
         
         return green_tokens, red_tokens
         
-    def _modify_logits(self, logits: torch.Tensor, token_window: List[int]) -> torch.Tensor:
+    def _modify_logits(self, logits: torch.Tensor, token_id: int, secret_key: str, bias_type: str) -> torch.Tensor:
         """
-        Modify logits by adding bias to green tokens.
+        Modify logits by adding bias to either green or red tokens.
         This is the core watermarking function that biases the model's predictions
-        toward selecting tokens from the "green list" determined by previous tokens.
+        toward selecting tokens from the specified list determined by previous token and secret key.
         
         Args:
             logits: Original logits from the model (prediction scores for each token)
-            token_window: List of previous token IDs to use for hashing (e.g., [101, 256, 512])
+            token_id: Previous token ID to use for hashing
+            secret_key: Secret key for watermarking
+            bias_type: Type of tokens to bias ("green" or "red")
             
         Returns:
-            Modified logits tensor with bias added to green tokens
+            Modified logits tensor with bias added to the specified tokens
         """
         # Ensure logits are in the right shape (batch_size, seq_len, vocab_size)
         # The tensor might be (1, 1, vocab_size) or just (1, vocab_size)
@@ -264,29 +304,36 @@ class LLMWatermarker:
         # Example: if logits tensor has 50,000 elements, vocab_size will be 50,000
         vocab_size = logits.shape[-1]
         
-        # Get green and red tokens as tensors using the deterministic hash of previous tokens
-        # Example: based on token_window [101, 256, 512], this might return
+        # Get green and red tokens as tensors using the deterministic hash of previous token and secret key
+        # Example: based on token_id 101 and secret key, this might return
         # green_tokens as tensor([42, 900, 5, ...]) and red_tokens (which we don't use here)
-        green_tokens, red_tokens = self._get_red_green_tokens(token_window)
+        green_tokens, red_tokens = self._get_red_green_tokens(token_id, secret_key)
         
         # Clone logits for modification to avoid affecting the original tensor
         # This creates a new tensor with the same values that we can safely modify
         modified_logits = logits.clone()
         
-        # Filter green tokens to ensure they're within vocabulary bounds using tensor operations
-        # Example: if vocab_size is 50,000 and green_tokens contains a value 60,000,
-        # we create a boolean mask tensor([True, True, True, False, ...]) for values < 50,000
-        mask = green_tokens < vocab_size
-        # Apply the mask to get only valid green tokens
-        # Example: valid_green_tokens becomes tensor([42, 900, 5, ...]) without any out-of-bounds tokens
-        valid_green_tokens = green_tokens[mask]
+        if bias_type == "green":
+            # Filter green tokens to ensure they're within vocabulary bounds using tensor operations
+            # Example: if vocab_size is 50,000 and green_tokens contains a value 60,000,
+            # we create a boolean mask tensor([True, True, True, False, ...]) for values < 50,000
+            mask = green_tokens < vocab_size
+            # Apply the mask to get only valid green tokens
+            # Example: valid_green_tokens becomes tensor([42, 900, 5, ...]) without any out-of-bounds tokens
+            valid_tokens_to_bias = green_tokens[mask]
+        elif bias_type == "red":
+            # Filter red tokens to ensure they're within vocabulary bounds
+            mask = red_tokens < vocab_size
+            valid_tokens_to_bias = red_tokens[mask]
+        else:
+            raise ValueError("bias_type must be 'green' or 'red'")
         
-        # Vectorized bias application - apply bias to all valid green tokens at once
-        # This means tokens in the "green list" will have higher probability of being selected
-        if valid_green_tokens.numel() > 0:  # Only proceed if we have valid tokens
-            # Example: if self.bias is 6.0, this adds 6.0 to the logits for all green tokens
-            # For the token indices in valid_green_tokens
-            modified_logits[valid_green_tokens] += self.bias
+        # Vectorized bias application - apply bias to all valid tokens at once
+        # This means tokens in the specified list will have higher probability of being selected
+        if valid_tokens_to_bias.numel() > 0:  # Only proceed if we have valid tokens
+            # Example: if self.bias is 6.0, this adds 6.0 to the logits for all specified tokens
+            # For the token indices in valid_tokens_to_bias
+            modified_logits[valid_tokens_to_bias] += self.bias
         
         # Reshape back to original format for compatibility with the model's expectations
         # Example: from tensor([1.2, 0.8, -0.5, ...]) back to tensor([[[1.2, 0.8, -0.5, ...]]])
@@ -299,7 +346,7 @@ class LLMWatermarker:
         verbose: bool = True
     ) -> Tuple[str, Dict[str, int], List[int]]:
         """
-        Generate text with watermarking.
+        Generate text with Lagrange interpolation watermarking.
         
         Args:
             prompt: Input text prompt
@@ -307,17 +354,16 @@ class LLMWatermarker:
             verbose: Whether to show progress bar
             
         Returns:
-            Tuple of (generated_text, statistics, green_red_mask)
+            Tuple of (generated_text, statistics, watermark_blocks_info)
         """
-        # Record start time for total duration
-        total_start_time = time.time()
 
         # Reset counters
         self.green_tokens_selected = 0
         self.red_tokens_selected = 0
+        self.blocks_encoded = 0
 
-        # Initialize mask for green/red tokens
-        green_red_mask = []
+        # Initialize tracking for watermark blocks
+        watermark_blocks_info = []
         
         # Format the prompt for the specific model
         formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer)
@@ -332,103 +378,158 @@ class LLMWatermarker:
         past_key_values = None
         cache_position = 0  # Track position in the cache
         
-        # Setup progress tracking
-        progress_bar = tqdm(range(max_new_tokens), disable=not verbose)
+        # Calculate number of complete blocks we can generate
+        num_blocks = max_new_tokens // self.n
+        if num_blocks == 0:
+            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least n ({self.n}) to generate one block")
         
-        # Generate tokens one by one
-        for i in progress_bar:
-            # Prepare input for the model
-            if past_key_values is None:
-                # First generation - use the full prompt
-                # Only use the last context_window tokens if needed
-                if len(generated_ids) > self.context_window:
-                    model_input_ids = torch.tensor([generated_ids[-self.context_window:]], device=self.device)
-                    cache_position = 0  # Reset cache position if we truncate
+        # Setup progress tracking
+        total_tokens_to_generate = num_blocks * self.n
+        progress_bar = tqdm(range(total_tokens_to_generate), disable=not verbose)
+        tokens_generated = 0
+        
+        # Generate tokens block by block
+        for block_idx in range(num_blocks):
+            # At the start of each block, determine the token to use for x-coordinate computation
+            if len(generated_ids) > len(input_ids[0]):
+                # Use the last generated token for subsequent blocks
+                previous_token_id = generated_ids[-1]
+            else:
+                # Use 0 for the very first block instead of last prompt token
+                # This is because when running detection we do not have access to the prompt
+                previous_token_id = 0
+            
+            # Compute x-coordinate for this block
+            x = self._hash_to_gf_element(previous_token_id, self.secret_key)
+            
+            # Compute y = f(x) using the line function
+            y = self.line_fnc(x)
+            
+            # Convert y to binary representation
+            y_bits = self._gf_to_binary(y)
+            
+            # Track this block
+            block_info = {
+                'block_idx': block_idx,
+                'x': int(x),
+                'y': int(y),
+                'y_bits': y_bits.copy(),
+                'tokens': []
+            }
+            
+            # Generate n tokens for this block (one for each bit of y)
+            for bit_idx in range(self.n):
+                # Prepare input for the model
+                if past_key_values is None:
+                    # First generation - use the full prompt
+                    # Only use the last context_window tokens if needed
+                    if len(generated_ids) > self.context_window:
+                        model_input_ids = torch.tensor([generated_ids[-self.context_window:]], device=self.device)
+                        cache_position = 0  # Reset cache position if we truncate
+                    else:
+                        model_input_ids = torch.tensor([generated_ids], device=self.device)
                 else:
-                    model_input_ids = torch.tensor([generated_ids], device=self.device)
-            else:
-                # Subsequent generations - only use the last generated token
-                model_input_ids = torch.tensor([[generated_ids[-1]]], device=self.device)
+                    # Subsequent generations - only use the last generated token
+                    model_input_ids = torch.tensor([[generated_ids[-1]]], device=self.device)
+                    
+                    # Check if we need to trim the cache due to context window limits
+                    if cache_position >= self.context_window:
+                        # Trim the K/V cache to stay within context window
+                        # Keep only the most recent tokens
+                        trim_amount = cache_position - self.context_window + 1
+                        past_key_values = self._trim_past_key_values(past_key_values, trim_amount)
+                        cache_position = self.context_window - 1
                 
-                # Check if we need to trim the cache due to context window limits
-                if cache_position >= self.context_window:
-                    # Trim the K/V cache to stay within context window
-                    # Keep only the most recent tokens
-                    trim_amount = cache_position - self.context_window + 1
-                    past_key_values = self._trim_past_key_values(past_key_values, trim_amount)
-                    cache_position = self.context_window - 1
-            
-            # Get logits from the model with K/V caching
-            with torch.no_grad():
-                outputs = self.model(
-                    model_input_ids, 
-                    past_key_values=past_key_values,
-                    use_cache=True  # Enable K/V caching
-                )
-                logits = outputs.logits[:, -1:, :]  # Get logits of last token
-                past_key_values = outputs.past_key_values  # Update cache
-                cache_position += model_input_ids.shape[1]  # Update position
-            
-            # Create a window of previous tokens for hashing
-            if len(generated_ids) >= self.hash_window:
-                token_window = generated_ids[-self.hash_window:]
-            else:
-                token_window = generated_ids
-            
-            # Modify logits with watermark using the token window
-            modified_logits = self._modify_logits(logits, token_window)
-            
-            # Apply temperature if set
-            if self.temperature > 0:
-                # Scale logits by temperature
-                modified_logits = modified_logits / self.temperature
+                # Get logits from the model with K/V caching
+                with torch.no_grad():
+                    outputs = self.model(
+                        model_input_ids, 
+                        past_key_values=past_key_values,
+                        use_cache=True  # Enable K/V caching
+                    )
+                    logits = outputs.logits[:, -1:, :]  # Get logits of last token
+                    past_key_values = outputs.past_key_values  # Update cache
+                    cache_position += model_input_ids.shape[1]  # Update position
                 
-            # Get probabilities through softmax
-            probs = torch.nn.functional.softmax(modified_logits, dim=-1)
-            
-            # Token sampling based on temperature
-            if self.temperature == 0 or self.temperature < 1e-6:
-                # Greedy sampling (select token with highest probability)
-                next_token_id = torch.argmax(probs, dim=-1).item()
-            else:
-                # Sample from the distribution
-                next_token_id = torch.multinomial(probs.squeeze(), 1).item()
-            
-            # Track whether the selected token was from the green or red list for watermark statistics
-            # Get the current division of tokens into green and red based on previous tokens
-            green_tokens, red_tokens = self._get_red_green_tokens(token_window)
-            
-            # Check vocabulary bounds for safety
-            vocab_size = len(self.tokenizer)
-            if next_token_id < vocab_size:  # Make sure token is in vocabulary range
-                # Create a tensor from the next token ID to enable vectorized comparison
-                # Example: if next_token_id is 42, this becomes tensor(42) on the device
-                next_token_tensor = torch.tensor(next_token_id, device=self.device)
+                # Determine bias type based on current bit
+                current_bit = y_bits[bit_idx]
+                bias_type = "green" if current_bit == 1 else "red"
                 
-                # Use tensor operations to efficiently check if the token is in the green list
-                # Example: if green_tokens contains 42, this returns True, otherwise False
-                is_green = (green_tokens == next_token_tensor).any().item()
+                # Use the previous token for vocabulary splitting
+                current_previous_token = generated_ids[-1]
                 
-                # Update statistics counters based on whether the selected token was green or red
-                if is_green:
-                    self.green_tokens_selected += 1  # Token was from the green list (biased)
-                    green_red_mask.append(1)
+                # Modify logits with watermark using the current previous token and secret key
+                modified_logits = self._modify_logits(logits, current_previous_token, self.secret_key, bias_type)
+                
+                # Apply temperature if set
+                if self.temperature > 0:
+                    # Scale logits by temperature
+                    modified_logits = modified_logits / self.temperature
+                    
+                # Get probabilities through softmax
+                probs = torch.nn.functional.softmax(modified_logits, dim=-1)
+                
+                # Token sampling based on temperature
+                if self.temperature == 0 or self.temperature < 1e-6:
+                    # Greedy sampling (select token with highest probability)
+                    next_token_id = torch.argmax(probs, dim=-1).item()
                 else:
-                    self.red_tokens_selected += 1    # Token was from the red list (unbiased)
-                    green_red_mask.append(0)
+                    # Sample from the distribution
+                    next_token_id = torch.multinomial(probs.squeeze(), 1).item()
+                
+                # Track whether the selected token was from the green or red list for watermark statistics
+                # Get the current division of tokens into green and red based on previous token and secret key
+                green_tokens, red_tokens = self._get_red_green_tokens(current_previous_token, self.secret_key)
+                
+                # Check vocabulary bounds for safety
+                vocab_size = len(self.tokenizer)
+                if next_token_id < vocab_size:  # Make sure token is in vocabulary range
+                    # Create a tensor from the next token ID to enable vectorized comparison
+                    next_token_tensor = torch.tensor(next_token_id, device=self.device)
+                    
+                    # Use tensor operations to efficiently check if the token is in the green list
+                    is_green = (green_tokens == next_token_tensor).any().item()
+                    
+                    # Update statistics counters based on whether the selected token was green or red
+                    if is_green:
+                        self.green_tokens_selected += 1  # Token was from the green list (biased)
+                    else:
+                        self.red_tokens_selected += 1    # Token was from the red list (unbiased)
+                
+                # Add the new token to generated ids
+                generated_ids.append(next_token_id)
+                block_info['tokens'].append(next_token_id)
+                tokens_generated += 1
+                
+                # Update progress bar with stats
+                green_ratio = self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
+                progress_bar.set_description(f"Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.n}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}, Ratio: {green_ratio:.2f}")
+                progress_bar.update(1)
+                
+                # Check if we've reached an EOS token
+                if next_token_id == self.tokenizer.eos_token_id:
+                    break
             
-            # Update progress bar with stats
-            green_ratio = self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
-            progress_bar.set_description(f"Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}, Ratio: {green_ratio:.2f}")
+            # Add completed block info
+            watermark_blocks_info.append(block_info)
+            self.blocks_encoded += 1
             
-            # Add the new token to generated ids
-            generated_ids.append(next_token_id)
-            
-            # Check if we've reached an EOS token
-            if next_token_id == self.tokenizer.eos_token_id:
+            # Check if we hit EOS in the middle of a block
+            if generated_ids[-1] == self.tokenizer.eos_token_id:
                 break
+        
+        progress_bar.close()
 
         # Decode and return the generated text
         generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        
+        # Create statistics dictionary
+        statistics = {
+            'green_tokens': self.green_tokens_selected,
+            'red_tokens': self.red_tokens_selected,
+            'blocks_encoded': self.blocks_encoded,
+            'total_tokens_generated': tokens_generated,
+            'green_ratio': self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
+        }
 
-        return generated_text, green_red_mask
+        return generated_text, statistics, watermark_blocks_info
