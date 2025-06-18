@@ -379,9 +379,11 @@ class LLMWatermarker:
         cache_position = 0  # Track position in the cache
         
         # Calculate number of complete blocks we can generate
+        if max_new_tokens % self.n != 0:
+            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be divisible by n ({self.n}) to ensure complete blocks.")
         num_blocks = max_new_tokens // self.n
         if num_blocks == 0:
-            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least n ({self.n}) to generate one block")
+            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least n ({self.n}) to generate at least one block.")
         
         # Setup progress tracking
         total_tokens_to_generate = num_blocks * self.n
