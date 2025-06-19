@@ -25,7 +25,7 @@ import src.paths as paths
 
 
 
-class LLMWatermarker:
+class LLMWatermarkerEncoder:
     def __init__(
         self,
         model_name: str,

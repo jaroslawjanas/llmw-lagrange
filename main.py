@@ -1,11 +1,13 @@
 import argparse
 import galois
 import secrets
-import src.paths as paths
 import random
 import numpy as np
 import torch
+import src.paths as paths
 from src.utils import get_shuffled_essays
+from src.llm_watermark import LLMWatermarkerEncoder
+
 
 def main():
     parser = argparse.ArgumentParser(description="LLM Text Watermarking based on Lagrange Interpolation")
@@ -58,12 +60,9 @@ def main():
 
     # Determine device
     device = "cpu" if args.no_cuda else None
-
-    # Import and test the watermarker
-    from src.llm_watermark import LLMWatermarker
     
     # Create watermarker instance
-    watermarker = LLMWatermarker(
+    watermarker = LLMWatermarkerEncoder(
         model_name=args.model,
         secret_key=secret_key,
         line_fnc=line_fnc,
