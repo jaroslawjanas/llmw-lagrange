@@ -81,7 +81,7 @@ def main():
     test_prompt = args.prompt if args.prompt else "The quick brown fox"
     print(f"\nGenerating text with watermark for prompt: '{test_prompt}'")
     
-    generated_text, statistics, watermark_blocks = watermarker.generate_text(
+    generated_text, statistics, watermark_blocks_info = watermarker.generate_text(
         prompt=test_prompt,
         max_new_tokens=args.max_tokens,
         verbose=True
@@ -90,8 +90,10 @@ def main():
     print(f"\nGenerated text:\n{generated_text}")
     print(f"\nStatistics: {statistics}")
     print(f"\nWatermark blocks info:")
-    for i, block in enumerate(watermark_blocks):
-        print(f"  Block {i}: x={block['x']}, y={block['y']}, bits={block['y_bits']}")
+    # Calculate the maximum width needed for x and y values based on n
+    max_gf_value_str_len = len(str(2**args.n - 1))
+    for i, block in enumerate(watermark_blocks_info):
+        print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
 
 
 if __name__ == "__main__":

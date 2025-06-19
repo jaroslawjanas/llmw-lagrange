@@ -412,11 +412,12 @@ class LLMWatermarker:
             
             # Track this block
             block_info = {
-                'block_idx': block_idx,
-                'x': int(x),
-                'y': int(y),
-                'y_bits': y_bits.copy(),
-                'tokens': []
+                "block_idx": block_idx,
+                "x": int(x),
+                "y": int(y),
+                "y_bits": y_bits.copy(),
+                "encoded_bits": [],
+                "tokens": []
             }
             
             # Generate n tokens for this block (one for each bit of y)
@@ -491,21 +492,20 @@ class LLMWatermarker:
                     
                     # Use tensor operations to efficiently check if the token is in the green list
                     is_green = (green_tokens == next_token_tensor).any().item()
-                    
-                    # Update statistics counters based on whether the selected token was green or red
                     if is_green:
-                        self.green_tokens_selected += 1  # Token was from the green list (biased)
+                        block_info["encoded_bits"].append(1)
+                        self.green_tokens_selected += 1
                     else:
-                        self.red_tokens_selected += 1    # Token was from the red list (unbiased)
-                
+                        block_info["encoded_bits"].append(0)
+                        self.red_tokens_selected += 1
+
                 # Add the new token to generated ids
                 generated_ids.append(next_token_id)
                 block_info['tokens'].append(next_token_id)
                 tokens_generated += 1
                 
                 # Update progress bar with stats
-                green_ratio = self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
-                progress_bar.set_description(f"Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.n}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}, Ratio: {green_ratio:.2f}")
+                progress_bar.set_description(f"Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.n}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}")
                 progress_bar.update(1)
                 
                 # Check if we've reached an EOS token
