@@ -5,11 +5,12 @@ import src.paths as paths
 import random
 import numpy as np
 import torch
+from src.utils import get_shuffled_essays
 
 def main():
     parser = argparse.ArgumentParser(description="LLM Text Watermarking based on Lagrange Interpolation")
     parser.add_argument("--model", type=str, default="facebook/opt-125m", help="Model to use")
-    parser.add_argument("--max-tokens", type=int, default=100, help="Maximum tokens to generate")
+    parser.add_argument("--max-tokens", type=int, default=304, help="Maximum tokens to generate")
     parser.add_argument("--green-fraction", type=float, default=0.5, help="Fraction of tokens in green list")
     parser.add_argument("--bias", type=float, default=6.0, help="Bias to add to green/red tokens")
     parser.add_argument("--n", type=int, default=8, help="Size of the field and the blocks to be encoded")
@@ -76,24 +77,65 @@ def main():
         temperature=args.temperature,
         hash_window=args.hash_window
     )
+
+    # Get prompts
+    if args.prompt:
+        # Single custom prompt
+        prompts = [args.prompt]
+        print(f"\n--- Using Custom Prompt ---")
+        print(args.prompt[:200] + "..." if len(args.prompt) > 200 else args.prompt)
+        print("---------------------------\n")
+
+    else:
+        # Get shuffled essays from dataset
+        dataset_name = args.dataset[0]
+        dataset_subset = args.dataset[1]
+        dataset_split = args.dataset[2]
+        dataset_column = args.dataset[3]
+
+        prompts = get_shuffled_essays(
+            dataset_name=dataset_name,
+            dataset_subset=dataset_subset,
+            dataset_split=dataset_split,
+            dataset_column=dataset_column,
+            seed=args.seed,
+            n_prompts=args.n_prompts
+        )
+        if args.n_prompts == 1:
+            print(f"\n--- Random Prompt from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
+            print(prompts[0][:200] + "..." if len(prompts[0]) > 200 else prompts[0])
+            print("---------------------------\n")
+        else:
+            print(f"\n--- Processing {args.n_prompts} Shuffled Prompts from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
+            print(f"First prompt preview: {prompts[0][:100] + '...' if len(prompts[0]) > 100 else prompts[0]}")
+            print("---------------------------\n")
     
-    # Test with a simple prompt
-    test_prompt = args.prompt if args.prompt else "The quick brown fox"
-    print(f"\nGenerating text with watermark for prompt: '{test_prompt}'")
-    
-    generated_text, statistics, watermark_blocks_info = watermarker.generate_text(
-        prompt=test_prompt,
-        max_new_tokens=args.max_tokens,
-        verbose=True
-    )
-    
-    print(f"\nGenerated text:\n{generated_text}")
-    print(f"\nStatistics: {statistics}")
-    print(f"\nWatermark blocks info:")
-    # Calculate the maximum width needed for x and y values based on n
-    max_gf_value_str_len = len(str(2**args.n - 1))
-    for i, block in enumerate(watermark_blocks_info):
-        print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
+    total_prompts = len(prompts)
+    print(f"Generating {args.max_tokens} tokens per prompt with watermarking...")
+    print(f"Using dataset: {dataset_name}")
+    print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
+
+    for prompt_idx, prompt in enumerate(prompts, 1):
+        if total_prompts > 1:
+            print(f"\n{'='*60}")
+            print(f"Processing Prompt {prompt_idx}/{total_prompts}")
+            print(f"{'='*60}")
+            print(f"Prompt preview: {prompt[:100] + '...' if len(prompt) > 100 else prompt}")
+            print()
+
+        generated_text, statistics, watermark_blocks_info = watermarker.generate_text(
+            prompt=prompt,
+            max_new_tokens=args.max_tokens,
+            verbose=True
+        )
+        
+        print(f"\nGenerated text:\n{generated_text}")
+        print(f"\nStatistics: {statistics}")
+        print(f"\nWatermark blocks info:")
+        # Calculate the maximum width needed for x and y values based on n
+        max_gf_value_str_len = len(str(2**args.n - 1))
+        for i, block in enumerate(watermark_blocks_info):
+            print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
 
 
 if __name__ == "__main__":
