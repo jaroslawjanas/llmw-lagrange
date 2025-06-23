@@ -7,6 +7,7 @@ import torch
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
+from tqdm import tqdm
 
 
 def main():
@@ -118,12 +119,12 @@ def main():
         print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
 
     for prompt_idx, prompt in enumerate(prompts, 1):
-        if total_prompts > 1 and args.verbose:
+        if total_prompts > 1:
             print(f"\n{'='*60}")
             print(f"Processing Prompt {prompt_idx}/{total_prompts}")
-            print(f"{'='*60}")
-            print(f"Prompt preview: {prompt[:100] + '...' if len(prompt) > 100 else prompt}")
-            print()
+            if args.verbose:
+                print(f"{'='*60}")
+                print(f"Prompt preview: {prompt[:100] + '...' if len(prompt) > 100 else prompt}\n")
         
         if args.verbose:
             # Decoding
@@ -138,7 +139,8 @@ def main():
         )
         
         if args.verbose:
-            print(f"\nPrompt:\n {prompt}")
+            print(f"{'-'*60}")
+            print(f"\nPrompt:\n{prompt}")
             print(f"\nGenerated text:\n{generated_text}")
             print(f"\nStatistics: {statistics}")
             print(f"\nWatermark blocks info:")

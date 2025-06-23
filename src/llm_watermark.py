@@ -559,7 +559,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 tokens_generated += 1
                 
                 # Update progress bar with stats
-                progress_bar.set_description(f"Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.n}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}")
+                progress_bar.set_description(f"Encoding Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.n}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}")
                 progress_bar.update(1)
                 
                 # Check if we've reached an EOS token
@@ -659,7 +659,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         blocks = []
         
         # Setup progress tracking for decoder
-        progress_bar = tqdm(range(num_complete_blocks))
+        progress_bar = tqdm(range(num_complete_blocks), desc="Decoding Blocks")
         
         # Process each complete block
         for block_idx in range(num_complete_blocks):
