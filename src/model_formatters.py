@@ -15,7 +15,8 @@ from src.utils import load_hf_token
 def format_prompt_for_model(
     prompt: str, 
     model_name: str, 
-    tokenizer: Optional[PreTrainedTokenizer] = None
+    tokenizer: Optional[PreTrainedTokenizer] = None,
+    verbose: bool = False
 ) -> str:
     """
     Format a prompt according to the requirements of the specific model.
@@ -31,10 +32,11 @@ def format_prompt_for_model(
     # Check if we can use AutoProcessor (preferred modern approach)
     if _can_import_auto_processor():
         try:
-            return format_with_processor(prompt, model_name)
+            return format_with_processor(prompt, model_name, verbose=verbose)
         except Exception as e:
-            print(f"[WARNING] Error using AutoProcessor for {model_name}: {e}")
-            print("[WARNING] Falling back to manual formatting")
+            if verbose:
+                print(f"[WARNING] Error using AutoProcessor for {model_name}: {e}")
+                print("[WARNING] Falling back to manual formatting\n")
     
     # If processor approach failed, just return the prompt unchanged
     return prompt
@@ -47,7 +49,7 @@ def _can_import_auto_processor():
     except ImportError:
         return False
 
-def format_with_processor(prompt: str, model_name: str) -> str:
+def format_with_processor(prompt: str, model_name: str, verbose: bool = False) -> str:
     """
     Format a prompt using AutoProcessor's apply_chat_template method.
     
@@ -60,7 +62,8 @@ def format_with_processor(prompt: str, model_name: str) -> str:
     """
     from transformers import AutoProcessor
     
-    print(f"[DEBUG] Using AutoProcessor chat template for: {model_name}")
+    if verbose:
+        print(f"[DEBUG] Using AutoProcessor chat template for: {model_name}")
     
     # Convert prompt to messages format
     messages = [{"role": "user", "content": prompt}]
@@ -78,9 +81,11 @@ def format_with_processor(prompt: str, model_name: str) -> str:
             enable_thinking=False
         )
         
-        print(f"[DEBUG] Successfully formatted with processor")
+        if verbose:
+            print(f"[DEBUG] Successfully formatted with processor")
         return formatted_prompt
         
     except Exception as e:
-        print(f"[DEBUG] Error using processor template: {str(e)}")
+        if verbose:
+            print(f"[DEBUG] Error using processor template: {str(e)}")
         raise e

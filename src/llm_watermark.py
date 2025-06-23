@@ -40,6 +40,7 @@ class LLMWatermarkerBase(ABC):
         green_list_fraction: float = 0.5,
         seed: int = 4242,
         cache_dir: str = paths.CACHE_DIR,
+        verbose: bool = False,
     ):
         """
         Initialize the base watermarker with shared parameters.
@@ -60,13 +61,15 @@ class LLMWatermarkerBase(ABC):
         self.green_list_fraction = green_list_fraction
         self.seed = seed
         self.cache_dir = cache_dir
+        self.verbose = verbose
         
         # Load tokenizer (shared by both encoder and decoder)
         self._load_tokenizer()
         
     def _load_tokenizer(self):
         """Load the tokenizer."""
-        print(f"Loading tokenizer for: {self.model_name}")
+        if self.verbose:
+            print(f"Loading tokenizer for: {self.model_name}")
         
         # Get HuggingFace token if available
         token = load_hf_token()
@@ -192,7 +195,7 @@ class LLMWatermarkerBase(ABC):
         return green_tokens, red_tokens
 
 
-class LLMWatermarkerEncoder(LLMWatermarkerBase):
+class LLMWatermarkEncoder(LLMWatermarkerBase):
     def __init__(
         self,
         model_name: str,
@@ -208,6 +211,7 @@ class LLMWatermarkerEncoder(LLMWatermarkerBase):
         context_window: int = 1024,
         temperature: float = 0.0,
         hash_window: int = 1,
+        verbose: bool = False
     ):
         """
         Initialize the watermarker with the specified model and parameters.
@@ -228,7 +232,7 @@ class LLMWatermarkerEncoder(LLMWatermarkerBase):
             hash_window: Number of previous tokens to hash together (default: 1)
         """
         # Initialize base class
-        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir)
+        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, verbose)
         
         # Encoder-specific parameters
         self.line_fnc = line_fnc
@@ -243,14 +247,16 @@ class LLMWatermarkerEncoder(LLMWatermarkerBase):
         else:
             self.device = device
             
-        print(f"Using device: {self.device}")
+        if self.verbose:
+            print(f"Using device: {self.device}")
         
         # Load model (tokenizer already loaded by base class)
         self._load_model()
         
     def _load_model(self):
         """Load the model."""
-        print(f"Loading model: {self.model_name}")
+        if self.verbose:
+            print(f"Loading model: {self.model_name}")
         
         # Get HuggingFace token if available
         token = load_hf_token()
@@ -413,7 +419,7 @@ class LLMWatermarkerEncoder(LLMWatermarkerBase):
         watermark_blocks_info = []
         
         # Format the prompt for the specific model
-        formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer)
+        formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer, verbose=self.verbose)
         
         # Tokenize the formatted prompt
         input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="pt").to(self.device)
@@ -434,7 +440,7 @@ class LLMWatermarkerEncoder(LLMWatermarkerBase):
         
         # Setup progress tracking
         total_tokens_to_generate = num_blocks * self.n
-        progress_bar = tqdm(range(total_tokens_to_generate), disable=not verbose)
+        progress_bar = tqdm(range(total_tokens_to_generate))
         tokens_generated = 0
         
         # Generate tokens block by block
@@ -585,7 +591,7 @@ class LLMWatermarkerEncoder(LLMWatermarkerBase):
         return generated_text, statistics, watermark_blocks_info
 
 
-class LLMWatermarkerDecoder(LLMWatermarkerBase):
+class LLMWatermarkDecoder(LLMWatermarkerBase):
     """
     Decoder for extracting watermark information from LLM-generated text.
     Reverses the encoding process to extract x-coordinates and y-bit sequences.
@@ -600,6 +606,7 @@ class LLMWatermarkerDecoder(LLMWatermarkerBase):
         green_list_fraction: float = 0.5,
         seed: int = 4242,
         cache_dir: str = paths.CACHE_DIR,
+        verbose: bool = False,
     ):
         """
         Initialize the decoder with the same parameters used for encoding.
@@ -614,7 +621,7 @@ class LLMWatermarkerDecoder(LLMWatermarkerBase):
             cache_dir: Directory to cache models
         """
         # Initialize base class (loads tokenizer)
-        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir)
+        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, verbose)
         
     def decode_text(self, text: str, prompt: str = None) -> List[Dict[str, Union[int, List[int]]]]:
         """
@@ -634,8 +641,7 @@ class LLMWatermarkerDecoder(LLMWatermarkerBase):
         
         # If prompt is provided, extract only the generated portion
         if prompt is not None:
-            from src.model_formatters import format_prompt_for_model
-            formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer)
+            formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer, self.verbose)
             prompt_token_ids = self.tokenizer.encode(formatted_prompt, add_special_tokens=False)
             
             # Extract only the generated tokens (after the prompt)
@@ -651,6 +657,9 @@ class LLMWatermarkerDecoder(LLMWatermarkerBase):
             return []  # No complete blocks to decode
         
         blocks = []
+        
+        # Setup progress tracking for decoder
+        progress_bar = tqdm(range(num_complete_blocks))
         
         # Process each complete block
         for block_idx in range(num_complete_blocks):
@@ -692,5 +701,7 @@ class LLMWatermarkerDecoder(LLMWatermarkerBase):
                 'x': int(x),
                 'y_bits': y_bits
             })
+            progress_bar.update(1)
         
+        progress_bar.close()
         return blocks

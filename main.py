@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import src.paths as paths
 from src.utils import get_shuffled_essays
-from src.llm_watermark import LLMWatermarkerEncoder, LLMWatermarkerDecoder
+from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
 
 
 def main():
@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--temperature", "--temp", type=float, default=0.0, help="Sampling temperature (default: 0.0 = greedy sampling, higher = more random)")
     parser.add_argument("--hash-window", type=int, default=1, help="Number of previous tokens to hash together (default: 1)") 
     parser.add_argument("--n-prompts", type=int, default=1, help="Number of prompts to process (default: 1)")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
 
     args = parser.parse_args()
 
@@ -47,22 +48,24 @@ def main():
     # Generate two random numbers in the Galois field
     a0 = gf.Random()
     a1 = gf.Random()
-    print(f"Generated random numbers in GF(2^{args.n}): a0 = {a0}, a1 = {a1}")
-    print(f"K = {a0}|{a1}")
+    if args.verbose:
+        print(f"Generated random numbers in GF(2^{args.n}): a0 = {a0}, a1 = {a1}")
+        print(f"K = {a0}|{a1}\n")
     
     # Create an anonymous function y = x * a1 + a0
     line_fnc = lambda x: x * a1 + a0
     
     # Generate a 64-bit secret key outside of the Galois field
     secret_key = secrets.token_hex(8)  # 8 bytes = 64 bits, displayed as 16 hexadecimal characters
-    print(f"Generated 64-bit secret key: {secret_key}")
+    if args.verbose:
+        print(f"Generated 64-bit secret key: {secret_key}")
 
 
     # Determine device
     device = "cpu" if args.no_cuda else None
     
     # Create watermarker instance
-    watermarker = LLMWatermarkerEncoder(
+    watermarker = LLMWatermarkEncoder(
         model_name=args.model,
         secret_key=secret_key,
         line_fnc=line_fnc,
@@ -74,7 +77,8 @@ def main():
         device=device,
         context_window=args.context_window,
         temperature=args.temperature,
-        hash_window=args.hash_window
+        hash_window=args.hash_window,
+        verbose=args.verbose
     )
 
     # Get dataset info
@@ -87,9 +91,10 @@ def main():
     if args.prompt:
         # Single custom prompt
         prompts = [args.prompt]
-        print(f"\n--- Using Custom Prompt ---")
-        print(args.prompt[:200] + "..." if len(args.prompt) > 200 else args.prompt)
-        print("---------------------------\n")
+        if args.verbose:
+            print(f"\n--- Using Custom Prompt ---")
+            print(args.prompt[:200] + "..." if len(args.prompt) > 200 else args.prompt)
+            print("---------------------------\n")
 
     else:
         # Get shuffled essays from dataset
@@ -101,76 +106,83 @@ def main():
             seed=args.seed,
             n_prompts=args.n_prompts
         )
-        if args.n_prompts == 1:
-            print(f"\n--- Random Prompt from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
+        if args.verbose:
+            print(f"\n--- Prompt from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
             print(prompts[0][:200] + "..." if len(prompts[0]) > 200 else prompts[0])
-            print("---------------------------\n")
-        else:
-            print(f"\n--- Processing {args.n_prompts} Shuffled Prompts from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
-            print(f"First prompt preview: {prompts[0][:100] + '...' if len(prompts[0]) > 100 else prompts[0]}")
-            print("---------------------------\n")
+            print(f"{'='*60}\n")
     
     total_prompts = len(prompts)
-    print(f"Generating {args.max_tokens} tokens per prompt with watermarking...")
-    print(f"Using dataset: {dataset_name}")
-    print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
+    if args.verbose:
+        print(f"Generating {args.max_tokens} tokens per prompt with watermarking...")
+        print(f"Using dataset: {dataset_name}")
+        print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
 
     for prompt_idx, prompt in enumerate(prompts, 1):
-        if total_prompts > 1:
+        if total_prompts > 1 and args.verbose:
             print(f"\n{'='*60}")
             print(f"Processing Prompt {prompt_idx}/{total_prompts}")
             print(f"{'='*60}")
             print(f"Prompt preview: {prompt[:100] + '...' if len(prompt) > 100 else prompt}")
             print()
+        
+        if args.verbose:
+            # Decoding
+            print(f"\n{'='*60}")
+            print("Encoding")
+            print(f"{'='*60}")
 
         generated_text, statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
             max_new_tokens=args.max_tokens,
-            verbose=True
+            verbose=args.verbose
         )
         
-        print(f"\nGenerated text:\n{generated_text}")
-        print(f"\nStatistics: {statistics}")
-        print(f"\nWatermark blocks info:")
-        # Calculate the maximum width needed for x and y values based on n
-        max_gf_value_str_len = len(str(2**args.n - 1))
-        for i, block in enumerate(watermark_blocks_info):
-            print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
-        
-        # Test the decoder
-        print(f"\n{'='*60}")
-        print("Decoding...")
-        print(f"{'='*60}")
+        if args.verbose:
+            print(f"\nPrompt:\n {prompt}")
+            print(f"\nGenerated text:\n{generated_text}")
+            print(f"\nStatistics: {statistics}")
+            print(f"\nWatermark blocks info:")
+            # Calculate the maximum width needed for x and y values based on n
+            max_gf_value_str_len = len(str(2**args.n - 1))
+            for i, block in enumerate(watermark_blocks_info):
+                print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
+            
+            # Decoding
+            print(f"\n{'='*60}")
+            print("Decoding")
+            print(f"{'='*60}")
         
         # Create decoder with same parameters
-        decoder = LLMWatermarkerDecoder(
+        decoder = LLMWatermarkDecoder(
             model_name=args.model,
             secret_key=secret_key,
             n=args.n,
             gf=gf,
             green_list_fraction=args.green_fraction,
-            seed=args.seed
+            seed=args.seed,
+            verbose=args.verbose
         )
         
         # Decode the generated text
         decoded_blocks = decoder.decode_text(generated_text, prompt)
         
-        print(f"Decoded {len(decoded_blocks)} blocks:")
-        for i, block in enumerate(decoded_blocks):
-            print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}")
-        
-        # Compare encoder vs decoder results
-        print(f"\nComparison (Encoder vs Decoder):")
-        print(f"{'Block':<6} {'Encoder X':<12} {'Decoder X':<12} {'Match':<6} {'Encoder Bits':<{args.n * 3}} {'Decoder Bits':<{args.n * 3}} {'Bits Match'}")
-        print("-" * (6 + 12 + 12 + 6 + args.n * 3 + args.n * 3 + 10))
-        
-        for i in range(min(len(watermark_blocks_info), len(decoded_blocks))):
-            enc_block = watermark_blocks_info[i]
-            dec_block = decoded_blocks[i]
-            x_match = "✓" if enc_block['x'] == dec_block['x'] else "✗"
-            bits_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'] else "✗"
+        if args.verbose:
+            print(f"Decoded {len(decoded_blocks)} blocks:")
+            for i, block in enumerate(decoded_blocks):
+                print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}")
             
-            print(f"{i:<6} {enc_block['x']:<12} {dec_block['x']:<12} {x_match:<6} {str(enc_block['y_bits']):<{args.n * 3}} {str(dec_block['y_bits']):<{args.n * 3}} {bits_match}")
+            # Compare encoder vs decoder results
+            print(f"\nComparison (Encoder vs Decoder):")
+            print(f"{'Block':<6} {'Encoder X':<12} {'Decoder X':<12} {'Match':<6} {'Encoder Bits':<{args.n * 3}} {'Decoder Bits':<{args.n * 3}} {'Bits Match'}")
+            print("-" * (6 + 12 + 12 + 6 + args.n * 3 + args.n * 3 + 10))
+            
+            for i in range(min(len(watermark_blocks_info), len(decoded_blocks))):
+                enc_block = watermark_blocks_info[i]
+                dec_block = decoded_blocks[i]
+                x_match = "✓" if enc_block['x'] == dec_block['x'] else "✗"
+                bits_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'] else "✗"
+                
+                print(f"{i:<6} {enc_block['x']:<12} {dec_block['x']:<12} {x_match:<6} {str(enc_block['y_bits']):<{args.n * 3}} {str(dec_block['y_bits']):<{args.n * 3}} {bits_match}")
 
 
 if __name__ == "__main__":
