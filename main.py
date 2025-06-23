@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import src.paths as paths
 from src.utils import get_shuffled_essays
-from src.llm_watermark import LLMWatermarkerEncoder
+from src.llm_watermark import LLMWatermarkerEncoder, LLMWatermarkerDecoder
 
 
 def main():
@@ -77,6 +77,12 @@ def main():
         hash_window=args.hash_window
     )
 
+    # Get dataset info
+    dataset_name = args.dataset[0]
+    dataset_subset = args.dataset[1]
+    dataset_split = args.dataset[2]
+    dataset_column = args.dataset[3]
+
     # Get prompts
     if args.prompt:
         # Single custom prompt
@@ -87,11 +93,6 @@ def main():
 
     else:
         # Get shuffled essays from dataset
-        dataset_name = args.dataset[0]
-        dataset_subset = args.dataset[1]
-        dataset_split = args.dataset[2]
-        dataset_column = args.dataset[3]
-
         prompts = get_shuffled_essays(
             dataset_name=dataset_name,
             dataset_subset=dataset_subset,
@@ -135,6 +136,41 @@ def main():
         max_gf_value_str_len = len(str(2**args.n - 1))
         for i, block in enumerate(watermark_blocks_info):
             print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
+        
+        # Test the decoder
+        print(f"\n{'='*60}")
+        print("Decoding...")
+        print(f"{'='*60}")
+        
+        # Create decoder with same parameters
+        decoder = LLMWatermarkerDecoder(
+            model_name=args.model,
+            secret_key=secret_key,
+            n=args.n,
+            gf=gf,
+            green_list_fraction=args.green_fraction,
+            seed=args.seed
+        )
+        
+        # Decode the generated text
+        decoded_blocks = decoder.decode_text(generated_text, prompt)
+        
+        print(f"Decoded {len(decoded_blocks)} blocks:")
+        for i, block in enumerate(decoded_blocks):
+            print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}")
+        
+        # Compare encoder vs decoder results
+        print(f"\nComparison (Encoder vs Decoder):")
+        print(f"{'Block':<6} {'Encoder X':<12} {'Decoder X':<12} {'Match':<6} {'Encoder Bits':<{args.n * 3}} {'Decoder Bits':<{args.n * 3}} {'Bits Match'}")
+        print("-" * (6 + 12 + 12 + 6 + args.n * 3 + args.n * 3 + 10))
+        
+        for i in range(min(len(watermark_blocks_info), len(decoded_blocks))):
+            enc_block = watermark_blocks_info[i]
+            dec_block = decoded_blocks[i]
+            x_match = "✓" if enc_block['x'] == dec_block['x'] else "✗"
+            bits_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'] else "✗"
+            
+            print(f"{i:<6} {enc_block['x']:<12} {dec_block['x']:<12} {x_match:<6} {str(enc_block['y_bits']):<{args.n * 3}} {str(dec_block['y_bits']):<{args.n * 3}} {bits_match}")
 
 
 if __name__ == "__main__":

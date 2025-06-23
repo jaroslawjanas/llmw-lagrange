@@ -12,6 +12,7 @@ import torch
 import numpy as np
 import time
 from typing import List, Tuple, Dict, Optional, Union
+from abc import ABC, abstractmethod
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -24,69 +25,48 @@ from src.utils import load_hf_token
 import src.paths as paths
 
 
-
-class LLMWatermarkerEncoder:
+class LLMWatermarkerBase(ABC):
+    """
+    Abstract base class for LLM watermarking encoder and decoder.
+    Contains shared functionality for both encoding and decoding operations.
+    """
+    
     def __init__(
         self,
         model_name: str,
         secret_key: str,
-        line_fnc: callable,
         n: int,
         gf: object,
         green_list_fraction: float = 0.5,
-        bias: float = 6.0,
         seed: int = 4242,
         cache_dir: str = paths.CACHE_DIR,
-        device: Optional[str] = None,
-        context_window: int = 1024,
-        temperature: float = 0.0,
-        hash_window: int = 1,
     ):
         """
-        Initialize the watermarker with the specified model and parameters.
+        Initialize the base watermarker with shared parameters.
         
         Args:
             model_name: HuggingFace model identifier
             secret_key: Secret key for watermarking
-            line_fnc: Function for Lagrange interpolation f(x) = a0 + a1*x
             n: Field size parameter (GF(2^n))
             gf: Galois field instance GF(2^n)
             green_list_fraction: Fraction of tokens to include in green list (default: 0.5)
-            bias: Logit bias to apply to green tokens (default: 6.0)
             seed: Random seed for reproducibility
             cache_dir: Directory to cache models
-            device: Device to run model on ('cuda', 'cpu', or None for auto-detection)
-            context_window: Maximum number of tokens to use as context for generation (default: 1024)
-            temperature: Sampling temperature (default: 0.0 = greedy sampling, higher = more random)
-            hash_window: Number of previous tokens to hash together (default: 1)
         """
         self.model_name = model_name
         self.secret_key = secret_key
-        self.line_fnc = line_fnc
         self.n = n
         self.gf = gf
         self.green_list_fraction = green_list_fraction
-        self.bias = bias
         self.seed = seed
         self.cache_dir = cache_dir
-        self.context_window = context_window
-        self.temperature = temperature
-        self.hash_window = hash_window
         
-        # Set device
-        if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = device
-            
-        print(f"Using device: {self.device}")
+        # Load tokenizer (shared by both encoder and decoder)
+        self._load_tokenizer()
         
-        # Load model and tokenizer
-        self._load_model_and_tokenizer()
-        
-    def _load_model_and_tokenizer(self):
-        """Load the model and tokenizer."""
-        print(f"Loading model: {self.model_name}")
+    def _load_tokenizer(self):
+        """Load the tokenizer."""
+        print(f"Loading tokenizer for: {self.model_name}")
         
         # Get HuggingFace token if available
         token = load_hf_token()
@@ -96,7 +76,6 @@ class LLMWatermarkerEncoder:
             "cache_dir": paths.MODELS_CACHE_DIR,  # Use models subdirectory
         }
         if token:
-            # Use token instead of deprecated use_auth_token
             tokenizer_kwargs["token"] = token
         
         # Load tokenizer
@@ -105,33 +84,10 @@ class LLMWatermarkerEncoder:
             **tokenizer_kwargs
         )
         
-        # Configure model loading options
-        model_kwargs = {
-            "cache_dir": paths.MODELS_CACHE_DIR,  # Use models subdirectory
-            "use_cache": True,  # Ensure K/V caching is enabled
-        }
-        if token:
-            model_kwargs["token"] = token
-        
-        # Load model with appropriate settings for the device
-        if self.device == "cuda":
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name, 
-                torch_dtype=torch.float16,  # Use float16 for memory efficiency
-                device_map="auto",
-                **model_kwargs
-            )
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                **model_kwargs
-            )
-            self.model.to(self.device)
-            
         # Ensure the tokenizer has a padding token
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-            
+    
     def _hash_to_gf_element(self, token_id: int, secret_key: str) -> object:
         """
         Hash a token ID and secret key to produce a GF(2^n) element.
@@ -174,6 +130,153 @@ class LLMWatermarkerEncoder:
         
         # Convert to list of integers
         return [int(bit) for bit in binary_str]
+    
+    def _get_red_green_tokens(self, token_id: int, secret_key: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Generate red and green token lists based on the hash of a token and secret key.
+        This creates a deterministic division of the vocabulary into "green" and "red" tokens.
+        
+        Args:
+            token_id: Single token ID to hash
+            secret_key: Secret key for watermarking
+            
+        Returns:
+            Tuple of (green_tokens, red_tokens) as tensors
+        """
+        # Create a hash from the token ID and secret key
+        hash_input = f"{token_id}-{secret_key}"
+        hash_object = hashlib.sha256(hash_input.encode())
+        hash_hex = hash_object.hexdigest()
+        
+        # Convert the hexadecimal hash to a 32-bit integer for use as a random seed
+        # This ensures deterministic outcomes for the same input token and secret key
+        hash_seed = int(hash_hex, 16) % (2**32)
+        
+        # Get the total number of tokens in the model's vocabulary
+        vocab_size = len(self.tokenizer)
+        
+        # Create a tensor containing all possible token indices (0 to vocab_size-1)
+        # Example: if vocab_size is 3000, all_tokens becomes tensor([0, 1, 2, ..., 2999])
+        all_tokens = torch.arange(vocab_size)
+        
+        # PyTorch doesn't have a direct seeded shuffle operation, so we implement
+        # a deterministic shuffle using random values and sorting
+        
+        # Set PyTorch's random generator to use our hash-derived seed
+        # This makes the shuffling deterministic based on the input tokens
+        torch.manual_seed(hash_seed)
+        
+        # Create random values and sort them to generate a permutation of indices
+        # Example: random_values might be tensor([0.12, 0.95, 0.33, ...])
+        random_values = torch.rand(vocab_size)
+        # Sort these values to get a permutation tensor
+        # Example: permutation might be tensor([0, 2, 1, ...]) if 0.12 is smallest, 0.33 is next, etc.
+        _, permutation = torch.sort(random_values)
+        # Use this permutation to shuffle the token indices
+        # This creates a deterministic random ordering of all vocabulary tokens
+        shuffled_tokens = all_tokens[permutation]
+        
+        # Reset the random seed back to the original seed of the LLMWatermarker
+        # This prevents the temporary seed from affecting other random operations
+        torch.manual_seed(self.seed)
+        
+        # Split the shuffled tokens into "green" and "red" lists
+        # Green tokens will get a positive bias during generation
+        split_point = int(vocab_size * self.green_list_fraction)
+        # Example: if green_list_fraction is 0.5 and vocab_size is 3000,
+        # the first 1500 tokens in shuffled_tokens become green tokens
+        green_tokens = shuffled_tokens[:split_point]  # Keep as tensor for efficiency
+        # The remaining tokens become red tokens
+        red_tokens = shuffled_tokens[split_point:]    # Keep as tensor for efficiency
+        
+        return green_tokens, red_tokens
+
+
+class LLMWatermarkerEncoder(LLMWatermarkerBase):
+    def __init__(
+        self,
+        model_name: str,
+        secret_key: str,
+        line_fnc: callable,
+        n: int,
+        gf: object,
+        green_list_fraction: float = 0.5,
+        bias: float = 6.0,
+        seed: int = 4242,
+        cache_dir: str = paths.CACHE_DIR,
+        device: Optional[str] = None,
+        context_window: int = 1024,
+        temperature: float = 0.0,
+        hash_window: int = 1,
+    ):
+        """
+        Initialize the watermarker with the specified model and parameters.
+        
+        Args:
+            model_name: HuggingFace model identifier
+            secret_key: Secret key for watermarking
+            line_fnc: Function for Lagrange interpolation f(x) = a0 + a1*x
+            n: Field size parameter (GF(2^n))
+            gf: Galois field instance GF(2^n)
+            green_list_fraction: Fraction of tokens to include in green list (default: 0.5)
+            bias: Logit bias to apply to green tokens (default: 6.0)
+            seed: Random seed for reproducibility
+            cache_dir: Directory to cache models
+            device: Device to run model on ('cuda', 'cpu', or None for auto-detection)
+            context_window: Maximum number of tokens to use as context for generation (default: 1024)
+            temperature: Sampling temperature (default: 0.0 = greedy sampling, higher = more random)
+            hash_window: Number of previous tokens to hash together (default: 1)
+        """
+        # Initialize base class
+        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir)
+        
+        # Encoder-specific parameters
+        self.line_fnc = line_fnc
+        self.bias = bias
+        self.context_window = context_window
+        self.temperature = temperature
+        self.hash_window = hash_window
+        
+        # Set device
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+            
+        print(f"Using device: {self.device}")
+        
+        # Load model (tokenizer already loaded by base class)
+        self._load_model()
+        
+    def _load_model(self):
+        """Load the model."""
+        print(f"Loading model: {self.model_name}")
+        
+        # Get HuggingFace token if available
+        token = load_hf_token()
+        
+        # Configure model loading options
+        model_kwargs = {
+            "cache_dir": paths.MODELS_CACHE_DIR,  # Use models subdirectory
+            "use_cache": True,  # Ensure K/V caching is enabled
+        }
+        if token:
+            model_kwargs["token"] = token
+        
+        # Load model with appropriate settings for the device
+        if self.device == "cuda":
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name, 
+                torch_dtype=torch.float16,  # Use float16 for memory efficiency
+                device_map="auto",
+                **model_kwargs
+            )
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                **model_kwargs
+            )
+            self.model.to(self.device)
             
     def _trim_past_key_values(self, past_key_values: Tuple, trim_amount: int) -> Tuple:
         """
@@ -212,66 +315,6 @@ class LLMWatermarkerEncoder:
         
         return tuple(trimmed_past)
         
-    def _get_red_green_tokens(self, token_id: int, secret_key: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Generate red and green token lists based on the hash of a token and secret key.
-        This creates a deterministic division of the vocabulary into "green" and "red" tokens.
-        
-        Args:
-            token_id: Single token ID to hash
-            secret_key: Secret key for watermarking
-            
-        Returns:
-            Tuple of (green_tokens, red_tokens) as tensors on the device
-        """
-        # Create a hash from the token ID and secret key
-        hash_input = f"{token_id}-{secret_key}"
-        hash_object = hashlib.sha256(hash_input.encode())
-        hash_hex = hash_object.hexdigest()
-        
-        # Convert the hexadecimal hash to a 32-bit integer for use as a random seed
-        # This ensures deterministic outcomes for the same input token and secret key
-        hash_seed = int(hash_hex, 16) % (2**32)
-        
-        # Get the total number of tokens in the model's vocabulary
-        vocab_size = len(self.tokenizer)
-        
-        # Create a tensor containing all possible token indices (0 to vocab_size-1)
-        # Example: if vocab_size is 3000, all_tokens becomes tensor([0, 1, 2, ..., 2999])
-        all_tokens = torch.arange(vocab_size, device=self.device)
-        
-        # PyTorch doesn't have a direct seeded shuffle operation, so we implement
-        # a deterministic shuffle using random values and sorting
-        
-        # Set PyTorch's random generator to use our hash-derived seed
-        # This makes the shuffling deterministic based on the input tokens
-        torch.manual_seed(hash_seed)
-        
-        # Create random values and sort them to generate a permutation of indices
-        # Example: random_values might be tensor([0.12, 0.95, 0.33, ...])
-        random_values = torch.rand(vocab_size, device=self.device)
-        # Sort these values to get a permutation tensor
-        # Example: permutation might be tensor([0, 2, 1, ...]) if 0.12 is smallest, 0.33 is next, etc.
-        _, permutation = torch.sort(random_values)
-        # Use this permutation to shuffle the token indices
-        # This creates a deterministic random ordering of all vocabulary tokens
-        shuffled_tokens = all_tokens[permutation]
-        
-        # Reset the random seed back to the original seed of the LLMWatermarker
-        # This prevents the temporary seed from affecting other random operations
-        torch.manual_seed(self.seed)
-        
-        # Split the shuffled tokens into "green" and "red" lists
-        # Green tokens will get a positive bias during generation
-        split_point = int(vocab_size * self.green_list_fraction)
-        # Example: if green_list_fraction is 0.5 and vocab_size is 3000,
-        # the first 1500 tokens in shuffled_tokens become green tokens
-        green_tokens = shuffled_tokens[:split_point]  # Keep as tensor for efficiency
-        # The remaining tokens become red tokens
-        red_tokens = shuffled_tokens[split_point:]    # Keep as tensor for efficiency
-        
-        return green_tokens, red_tokens
-        
     def _modify_logits(self, logits: torch.Tensor, token_id: int, secret_key: str, bias_type: str) -> torch.Tensor:
         """
         Modify logits by adding bias to either green or red tokens.
@@ -308,6 +351,10 @@ class LLMWatermarkerEncoder:
         # Example: based on token_id 101 and secret key, this might return
         # green_tokens as tensor([42, 900, 5, ...]) and red_tokens (which we don't use here)
         green_tokens, red_tokens = self._get_red_green_tokens(token_id, secret_key)
+        
+        # Move tensors to the same device as logits
+        green_tokens = green_tokens.to(logits.device)
+        red_tokens = red_tokens.to(logits.device)
         
         # Clone logits for modification to avoid affecting the original tensor
         # This creates a new tensor with the same values that we can safely modify
@@ -488,7 +535,8 @@ class LLMWatermarkerEncoder:
                 vocab_size = len(self.tokenizer)
                 if next_token_id < vocab_size:  # Make sure token is in vocabulary range
                     # Create a tensor from the next token ID to enable vectorized comparison
-                    next_token_tensor = torch.tensor(next_token_id, device=self.device)
+                    # Make sure it's on the same device as green_tokens
+                    next_token_tensor = torch.tensor(next_token_id, device=green_tokens.device)
                     
                     # Use tensor operations to efficiently check if the token is in the green list
                     is_green = (green_tokens == next_token_tensor).any().item()
@@ -535,3 +583,114 @@ class LLMWatermarkerEncoder:
         }
 
         return generated_text, statistics, watermark_blocks_info
+
+
+class LLMWatermarkerDecoder(LLMWatermarkerBase):
+    """
+    Decoder for extracting watermark information from LLM-generated text.
+    Reverses the encoding process to extract x-coordinates and y-bit sequences.
+    """
+    
+    def __init__(
+        self,
+        model_name: str,
+        secret_key: str,
+        n: int,
+        gf: object,
+        green_list_fraction: float = 0.5,
+        seed: int = 4242,
+        cache_dir: str = paths.CACHE_DIR,
+    ):
+        """
+        Initialize the decoder with the same parameters used for encoding.
+        
+        Args:
+            model_name: HuggingFace model identifier (same as used for encoding)
+            secret_key: Secret key for watermarking (same as used for encoding)
+            n: Field size parameter (GF(2^n)) (same as used for encoding)
+            gf: Galois field instance GF(2^n) (same as used for encoding)
+            green_list_fraction: Fraction of tokens in green list (same as used for encoding)
+            seed: Random seed for reproducibility (same as used for encoding)
+            cache_dir: Directory to cache models
+        """
+        # Initialize base class (loads tokenizer)
+        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir)
+        
+    def decode_text(self, text: str, prompt: str = None) -> List[Dict[str, Union[int, List[int]]]]:
+        """
+        Decode watermark information from generated text.
+        
+        Args:
+            text: The generated text to decode
+            prompt: Optional original prompt to exclude from decoding
+            
+        Returns:
+            List of blocks, each containing:
+            - 'x': x-coordinate (GF element as integer)
+            - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
+        """
+        # Tokenize the input text
+        token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+        
+        # If prompt is provided, extract only the generated portion
+        if prompt is not None:
+            from src.model_formatters import format_prompt_for_model
+            formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer)
+            prompt_token_ids = self.tokenizer.encode(formatted_prompt, add_special_tokens=False)
+            
+            # Extract only the generated tokens (after the prompt)
+            if len(token_ids) > len(prompt_token_ids):
+                token_ids = token_ids[len(prompt_token_ids):]
+            else:
+                return []  # No generated tokens to decode
+        
+        # Calculate number of complete blocks
+        num_complete_blocks = len(token_ids) // self.n
+        
+        if num_complete_blocks == 0:
+            return []  # No complete blocks to decode
+        
+        blocks = []
+        
+        # Process each complete block
+        for block_idx in range(num_complete_blocks):
+            start_idx = block_idx * self.n
+            end_idx = start_idx + self.n
+            block_tokens = token_ids[start_idx:end_idx]
+            
+            # Determine previous token for x-coordinate calculation
+            if block_idx == 0:
+                # First block uses token ID 0 (same as encoder)
+                previous_token = 0
+            else:
+                # Use last token of previous block
+                previous_token = token_ids[start_idx - 1]
+            
+            # Calculate x-coordinate using the same method as encoder
+            x = self._hash_to_gf_element(previous_token, self.secret_key)
+            
+            # Extract y_bits by classifying each token as green (1) or red (0)
+            y_bits = []
+            for i, token_id in enumerate(block_tokens):
+                # Determine the previous token for vocabulary splitting
+                if start_idx + i == 0:
+                    # Very first token in the sequence
+                    vocab_split_token = 0
+                else:
+                    # Use the previous token in the sequence
+                    vocab_split_token = token_ids[start_idx + i - 1]
+                
+                # Get green and red token lists for this position
+                green_tokens, red_tokens = self._get_red_green_tokens(vocab_split_token, self.secret_key)
+                
+                # Check if current token is in green list (1) or red list (0)
+                is_green = (green_tokens == token_id).any().item()
+                y_bits.append(1 if is_green else 0)
+            
+            # Store the extracted block information
+            blocks.append({
+                'x': int(x),
+                'y_bits': y_bits
+            })
+        
+        return blocks
