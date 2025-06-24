@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import src.paths as paths
 from src.utils import get_shuffled_essays
-from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder
+from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder, MCPSolver
 from tqdm import tqdm
 
 
@@ -132,7 +132,7 @@ def main():
             print("Encoding")
             print(f"{'='*60}")
 
-        generated_text, statistics, watermark_blocks_info = watermarker.generate_text(
+        full_text, generated_only_text, formatted_prompt, statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
             max_new_tokens=args.max_tokens,
             verbose=args.verbose
@@ -141,7 +141,7 @@ def main():
         if args.verbose:
             print(f"{'-'*60}")
             print(f"\nPrompt:\n{prompt}")
-            print(f"\nGenerated text:\n{generated_text}")
+            print(f"\nGenerated text:\n{full_text}")
             print(f"\nStatistics: {statistics}")
             print(f"\nWatermark blocks info:")
             # Calculate the maximum width needed for x and y values based on n
@@ -165,8 +165,8 @@ def main():
             verbose=args.verbose
         )
         
-        # Decode the generated text
-        decoded_blocks = decoder.decode_text(generated_text, prompt)
+        # Decode the generated text (using only the generated portion)
+        decoded_blocks = decoder.decode_text(generated_only_text)
         
         if args.verbose:
             print(f"Decoded {len(decoded_blocks)} blocks:")
@@ -174,17 +174,54 @@ def main():
                 print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}")
             
             # Compare encoder vs decoder results
-            print(f"\nComparison (Encoder vs Decoder):")
-            print(f"{'Block':<6} {'Encoder X':<12} {'Decoder X':<12} {'Match':<6} {'Encoder Bits':<{args.n * 3}} {'Decoder Bits':<{args.n * 3}} {'Bits Match'}")
-            print("-" * (6 + 12 + 12 + 6 + args.n * 3 + args.n * 3 + 10))
+            print(f"\nComparison (Watermark vs Encoded vs Decoded):")
+            print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark Matches'}")
+            print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))
             
             for i in range(min(len(watermark_blocks_info), len(decoded_blocks))):
                 enc_block = watermark_blocks_info[i]
                 dec_block = decoded_blocks[i]
-                x_match = "✓" if enc_block['x'] == dec_block['x'] else "✗"
-                bits_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'] else "✗"
                 
-                print(f"{i:<6} {enc_block['x']:<12} {dec_block['x']:<12} {x_match:<6} {str(enc_block['y_bits']):<{args.n * 3}} {str(dec_block['y_bits']):<{args.n * 3}} {bits_match}")
+                # Check if X coordinates match
+                x_match = "✓" if enc_block['x'] == dec_block['x'] else "✗"
+                
+                # Check if encoded bits match decoded bits (encoding/decoding consistency)
+                decoding_match = "✓" if enc_block['encoded_bits'] == dec_block['y_bits'] else "✗"
+                
+                # Check if watermark bits match decoded bits (watermark recovery success)
+                watermark_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'] else "✗"
+                
+                print(f"{i:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits']):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<8} {watermark_match}")
+            
+            # MCP Verification
+            print(f"\n{'='*60}")
+            print("MCP Watermark Verification")
+            print(f"{'='*60}")
+        
+        # Create MCP solver
+        mcp_solver = MCPSolver(gf=gf, n=args.n, verbose=args.verbose)
+        
+        # Verify watermark
+        verification_result = mcp_solver.verify_watermark(decoded_blocks, a0, a1)
+        
+        if args.verbose:
+            print(f"Verification Results:")
+            print(f"  Watermark Valid: {verification_result['is_valid']}")
+            print(f"  Confidence Score: {verification_result['confidence_score']:.3f}")
+            print(f"  Collinear Points: {verification_result['max_collinear_count']}/{verification_result['total_points']}")
+            print(f"  Original a₀: {a0}")
+            print(f"  Recovered a₀: {verification_result['recovered_a0']}")
+            print(f"  Original a₁: {a1}")
+            print(f"  Recovered a₁: {verification_result['recovered_a1']}")
+            
+            if verification_result['is_valid']:
+                print(f"  ✅ Watermark successfully verified!")
+            else:
+                print(f"  ❌ Watermark verification failed!")
+        else:
+            # Compact output for non-verbose mode
+            status = "✅ VALID" if verification_result['is_valid'] else "❌ INVALID"
+            print(f"Watermark Verification: {status} (Confidence: {verification_result['confidence_score']:.3f}, Points: {verification_result['max_collinear_count']}/{verification_result['total_points']})")
 
 
 if __name__ == "__main__":

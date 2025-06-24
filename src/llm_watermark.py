@@ -134,6 +134,26 @@ class LLMWatermarkerBase(ABC):
         # Convert to list of integers
         return [int(bit) for bit in binary_str]
     
+    def _binary_to_gf(self, binary_bits: List[int]) -> object:
+        """
+        Convert a binary sequence to a GF(2^n) element.
+        
+        Args:
+            binary_bits: List of n bits (0s and 1s)
+            
+        Returns:
+            Element in GF(2^n)
+        """
+        if len(binary_bits) != self.n:
+            raise ValueError(f"Binary sequence must have exactly {self.n} bits, got {len(binary_bits)}")
+        
+        # Convert binary list to integer
+        binary_str = ''.join(str(bit) for bit in binary_bits)
+        int_value = int(binary_str, 2)
+        
+        # Convert to GF(2^n) element
+        return self.gf(int_value)
+    
     def _get_red_green_tokens(self, token_id: int, secret_key: str) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Generate red and green token lists based on the hash of a token and secret key.
@@ -576,8 +596,18 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         
         progress_bar.close()
 
-        # Decode and return the generated text
-        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        # Separate prompt from generated content using existing input_ids
+        prompt_length = len(input_ids[0])  # input_ids is a tensor with batch dimension
+        
+        # Split the generated_ids into prompt and generated portions
+        if len(generated_ids) > prompt_length:
+            generated_only_ids = generated_ids[prompt_length:]
+        else:
+            generated_only_ids = []  # No new tokens were generated
+        
+        # Decode both full text and generated-only text
+        full_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        generated_only_text = self.tokenizer.decode(generated_only_ids, skip_special_tokens=True) if generated_only_ids else ""
         
         # Create statistics dictionary
         statistics = {
@@ -588,7 +618,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             'green_ratio': self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
         }
 
-        return generated_text, statistics, watermark_blocks_info
+        return full_text, generated_only_text, formatted_prompt, statistics, watermark_blocks_info
 
 
 class LLMWatermarkDecoder(LLMWatermarkerBase):
@@ -623,32 +653,21 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, verbose)
         
-    def decode_text(self, text: str, prompt: str = None) -> List[Dict[str, Union[int, List[int]]]]:
+    def decode_text(self, generated_only_text: str) -> List[Dict[str, Union[int, List[int]]]]:
         """
-        Decode watermark information from generated text.
+        Decode watermark information from generated text (without prompt).
         
         Args:
-            text: The generated text to decode
-            prompt: Optional original prompt to exclude from decoding
+            generated_only_text: The generated text to decode (prompt already removed)
             
         Returns:
             List of blocks, each containing:
             - 'x': x-coordinate (GF element as integer)
             - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
+            - 'y': y-value as GF element converted to integer
         """
-        # Tokenize the input text
-        token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-        
-        # If prompt is provided, extract only the generated portion
-        if prompt is not None:
-            formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer, self.verbose)
-            prompt_token_ids = self.tokenizer.encode(formatted_prompt, add_special_tokens=False)
-            
-            # Extract only the generated tokens (after the prompt)
-            if len(token_ids) > len(prompt_token_ids):
-                token_ids = token_ids[len(prompt_token_ids):]
-            else:
-                return []  # No generated tokens to decode
+        # Tokenize the generated-only text directly without any formatting
+        token_ids = self.tokenizer.encode(generated_only_text, add_special_tokens=False)
         
         # Calculate number of complete blocks
         num_complete_blocks = len(token_ids) // self.n
@@ -696,12 +715,220 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                 is_green = (green_tokens == token_id).any().item()
                 y_bits.append(1 if is_green else 0)
             
+            # Convert y_bits back to GF element
+            y_gf = self._binary_to_gf(y_bits)
+            
             # Store the extracted block information
             blocks.append({
                 'x': int(x),
-                'y_bits': y_bits
+                'y_bits': y_bits,
+                'y': int(y_gf)
             })
             progress_bar.update(1)
         
         progress_bar.close()
         return blocks
+
+
+class MCPSolver:
+    """
+    Maximum Collinear Points solver for watermark verification.
+    Implements the hashing-based algorithm with O(N²) complexity.
+    """
+    
+    def __init__(self, gf: object, n: int, verbose: bool = False):
+        """
+        Initialize the MCP solver.
+        
+        Args:
+            gf: Galois field instance GF(2^n)
+            n: Field size parameter
+            verbose: Whether to show detailed output
+        """
+        self.gf = gf
+        self.n = n
+        self.verbose = verbose
+    
+    def solve_mcp(self, points: List[Tuple[int, int]]) -> Tuple[int, object, List[Tuple[object, object]]]:
+        """
+        Solve the Maximum Collinear Points problem using hashing-based approach.
+        
+        Args:
+            points: List of (x, y) tuples as integers
+            
+        Returns:
+            Tuple of (max_count, best_slope, collinear_points_gf)
+            - max_count: Maximum number of collinear points found
+            - best_slope: Slope of the line with most points (GF element)
+            - collinear_points_gf: List of points on the best line as GF elements
+        """
+        if len(points) < 2:
+            return 0, None, []
+        
+        # Convert integer points to GF elements
+        gf_points = [(self.gf(x), self.gf(y)) for x, y in points]
+        
+        max_count = 1  # At least one point
+        best_slope = None
+        best_collinear_points = []
+        
+        if self.verbose:
+            print(f"Solving MCP for {len(gf_points)} points...")
+        
+        # For each point as reference
+        for i, (x_i, y_i) in enumerate(gf_points):
+            # Hash map to store slopes and their corresponding points
+            slope_map = {}
+            
+            # Compare with all other points
+            for j, (x_j, y_j) in enumerate(gf_points):
+                if i == j:
+                    continue
+                
+                # Calculate slope in GF(2^n)
+                if x_j == x_i:
+                    # Vertical line - skip as mentioned in the paper
+                    continue
+                
+                # slope = (y_j - y_i) / (x_j - x_i) in GF
+                numerator = y_j - y_i
+                denominator = x_j - x_i
+                slope = numerator * pow(denominator, -1)  # GF division using multiplicative inverse
+                
+                # Convert slope to integer for hashing
+                slope_key = int(slope)
+                
+                # Add point to this slope's list
+                if slope_key not in slope_map:
+                    slope_map[slope_key] = []
+                slope_map[slope_key].append((x_j, y_j))
+            
+            # Check each slope for maximum count
+            for slope_key, slope_points in slope_map.items():
+                # Count includes the reference point plus all points with this slope
+                count = len(slope_points) + 1
+                
+                if count > max_count:
+                    max_count = count
+                    best_slope = self.gf(slope_key)
+                    # Include the reference point in the collinear points
+                    best_collinear_points = [(x_i, y_i)] + slope_points
+        
+        if self.verbose:
+            print(f"Found maximum {max_count} collinear points with slope {best_slope}")
+        
+        return max_count, best_slope, best_collinear_points
+    
+    def recover_line_equation(self, collinear_points: List[Tuple[object, object]]) -> Tuple[object, object]:
+        """
+        Recover the line equation f(x) = a₀ + a₁x from collinear points.
+        
+        Args:
+            collinear_points: List of collinear points as GF elements
+            
+        Returns:
+            Tuple of (a₀, a₁) as GF elements
+        """
+        if len(collinear_points) < 2:
+            raise ValueError("Need at least 2 points to determine a line")
+        
+        # Take the first two points to determine the line
+        (x1, y1) = collinear_points[0]
+        (x2, y2) = collinear_points[1]
+        
+        if x1 == x2:
+            raise ValueError("Cannot determine line from vertical points")
+        
+        # Calculate slope: a₁ = (y₂ - y₁) / (x₂ - x₁)
+        a1 = (y2 - y1) * pow((x2 - x1), -1)
+        
+        # Calculate intercept: a₀ = y₁ - a₁ * x₁
+        a0 = y1 - a1 * x1
+        
+        if self.verbose:
+            print(f"Recovered line: f(x) = {a0} + {a1}*x")
+        
+        return a0, a1
+    
+    def verify_watermark(self, decoded_blocks: List[Dict], original_a0: object, original_a1: object) -> Dict:
+        """
+        Complete watermark verification pipeline.
+        
+        Args:
+            decoded_blocks: List of decoded blocks from LLMWatermarkDecoder
+            original_a0: Original a₀ coefficient (GF element)
+            original_a1: Original a₁ coefficient (GF element)
+            
+        Returns:
+            Dictionary containing:
+            - 'is_valid': Boolean indicating if watermark is valid
+            - 'confidence_score': Float between 0 and 1
+            - 'recovered_a0': Recovered a₀ coefficient
+            - 'recovered_a1': Recovered a₁ coefficient
+            - 'max_collinear_count': Number of points on the best line
+            - 'total_points': Total number of points analyzed
+        """
+        if not decoded_blocks:
+            return {
+                'is_valid': False,
+                'confidence_score': 0.0,
+                'recovered_a0': None,
+                'recovered_a1': None,
+                'max_collinear_count': 0,
+                'total_points': 0
+            }
+        
+        # Extract (x, y) points as integers
+        points = [(block['x'], block['y']) for block in decoded_blocks]
+        
+        if self.verbose:
+            print(f"Verifying watermark with {len(points)} points...")
+            print(f"Original line: f(x) = {original_a0} + {original_a1}*x")
+        
+        # Solve MCP problem
+        max_count, best_slope, collinear_points = self.solve_mcp(points)
+        
+        if max_count < 2:
+            return {
+                'is_valid': False,
+                'confidence_score': 0.0,
+                'recovered_a0': None,
+                'recovered_a1': None,
+                'max_collinear_count': max_count,
+                'total_points': len(points)
+            }
+        
+        # Recover line equation
+        try:
+            recovered_a0, recovered_a1 = self.recover_line_equation(collinear_points)
+        except ValueError as e:
+            if self.verbose:
+                print(f"Failed to recover line equation: {e}")
+            return {
+                'is_valid': False,
+                'confidence_score': 0.0,
+                'recovered_a0': None,
+                'recovered_a1': None,
+                'max_collinear_count': max_count,
+                'total_points': len(points)
+            }
+        
+        # Check if recovered coefficients match original
+        is_valid = (recovered_a0 == original_a0) and (recovered_a1 == original_a1)
+        
+        # Calculate confidence score based on the ratio of collinear points
+        confidence_score = max_count / len(points)
+        
+        if self.verbose:
+            print(f"Recovered line: f(x) = {recovered_a0} + {recovered_a1}*x")
+            print(f"Match: a₀={recovered_a0 == original_a0}, a₁={recovered_a1 == original_a1}")
+            print(f"Confidence: {confidence_score:.3f} ({max_count}/{len(points)} points)")
+        
+        return {
+            'is_valid': is_valid,
+            'confidence_score': confidence_score,
+            'recovered_a0': recovered_a0,
+            'recovered_a1': recovered_a1,
+            'max_collinear_count': max_count,
+            'total_points': len(points)
+        }
