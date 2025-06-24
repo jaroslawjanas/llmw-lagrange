@@ -531,8 +531,13 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 current_bit = y_bits[bit_idx]
                 bias_type = "green" if current_bit == 1 else "red"
                 
-                # Use the previous token for vocabulary splitting
-                current_previous_token = generated_ids[-1]
+                # For vocabulary splitting - use token_id = 0 for very first token, otherwise use previous generated token
+                if tokens_generated == 0:
+                    # Very first token being generated
+                    current_previous_token = 0
+                else:
+                    # Use the previous generated token (never use prompt tokens)
+                    current_previous_token = generated_ids[-1]
                 
                 # Modify logits with watermark using the current previous token and secret key
                 modified_logits = self._modify_logits(logits, current_previous_token, self.secret_key, bias_type)
