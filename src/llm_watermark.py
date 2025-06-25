@@ -777,9 +777,6 @@ class MCPSolver:
         best_slope = None
         best_collinear_points = []
         
-        if self.verbose:
-            print(f"Solving MCP for {len(gf_points)} points...")
-        
         # For each point as reference
         for i, (x_i, y_i) in enumerate(gf_points):
             # Hash map to store slopes and their corresponding points
@@ -850,9 +847,6 @@ class MCPSolver:
         # Calculate intercept: a₀ = y₁ - a₁ * x₁
         a0 = y1 - a1 * x1
         
-        if self.verbose:
-            print(f"Recovered line: f(x) = {a0} + {a1}*x")
-        
         return a0, a1
     
     def verify_watermark(self, decoded_blocks: List[Dict], original_a0: object, original_a1: object, watermark_blocks: List[Dict] = None) -> Dict:
@@ -889,7 +883,6 @@ class MCPSolver:
         
         if self.verbose:
             print(f"Verifying watermark with {len(points)} points...")
-            print(f"Original line: f(x) = {original_a0} + {original_a1}*x")
         
         # Solve MCP problem
         max_count, best_slope, collinear_points = self.solve_mcp(points)
@@ -929,11 +922,6 @@ class MCPSolver:
             for i in range(min_blocks):
                 if watermark_blocks[i]['y_bits'] == decoded_blocks[i]['y_bits']:
                     matching_blocks += 1
-        
-        if self.verbose:
-            print(f"Recovered line: f(x) = {recovered_a0} + {recovered_a1}*x")
-            print(f"Match: a₀={recovered_a0 == original_a0}, a₁={recovered_a1 == original_a1}")
-            print(f"Matching blocks: {matching_blocks}/{len(decoded_blocks) if decoded_blocks else 0}")
         
         return {
             'is_valid': is_valid,

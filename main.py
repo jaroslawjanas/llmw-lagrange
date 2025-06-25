@@ -134,6 +134,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     
     stats_file = os.path.join(output_dir, "statistics.csv")
+    stats_parquet_file = os.path.join(output_dir, "statistics.parquet")
     
     # Initialize DataFrame with all required columns
     columns = [
@@ -143,10 +144,27 @@ def main():
         'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
     ]
     
-    stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
+    # Define explicit column types for proper data handling
+    column_dtypes = {
+        'field_size': 'int64',
+        'prompt': 'string',
+        'generated_text': 'string', 
+        'token_length': 'int64',
+        'a0': 'int64',
+        'a1': 'int64',
+        'recovered_a0': 'Int64',  # Nullable integer for None values
+        'recovered_a1': 'Int64',  # Nullable integer for None values
+        'secret_key': 'string',
+        'watermark_blocks': 'string',  # JSON string
+        'decoded_blocks': 'string',    # JSON string
+        'matching_blocks': 'int64',
+        'watermark_recovered': 'boolean',
+        'encoding_time': 'float64',
+        'decoding_time': 'float64',
+        'mcp_time': 'float64'
+    }
     
-    if args.verbose:
-        print(f"Statistics will be saved to: {stats_file}")
+    stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
 
     for prompt_idx, prompt in enumerate(prompts, 0):
         if total_prompts > 1:
@@ -158,13 +176,13 @@ def main():
         
         if args.verbose:
             # Encoding
-            print(f"\n{'='*60}")
+            print(f"\n{'-'*60}")
             print("Encoding")
-            print(f"{'='*60}")
+            print(f"{'-'*60}")
 
         # Time encoding
         encoding_start = time.time()
-        full_text, generated_only_text, formatted_prompt, statistics, watermark_blocks_info = watermarker.generate_text(
+        full_text, generated_only_text, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
             max_new_tokens=args.max_tokens,
             verbose=args.verbose
@@ -175,17 +193,26 @@ def main():
             print(f"{'-'*60}")
             print(f"\nPrompt:\n{prompt}")
             print(f"\nGenerated text:\n{full_text}")
-            print(f"\nStatistics: {statistics}")
+
+            print(f"\n{'-'*60}")
+
+            print(f"\nGeneration statistics:")
+            print(f"  Total tokens: {generation_statistics['total_tokens_generated']}")
+            print(f"  Green tokens: {generation_statistics['green_tokens']}")
+            print(f"  Red tokens: {generation_statistics['red_tokens']}")
+            print(f"  Greeen ratio: {generation_statistics['green_ratio']}")
+            print(f"  Blocks encoded: {generation_statistics['blocks_encoded']}")
+
             print(f"\nWatermark blocks info:")
             # Calculate the maximum width needed for x and y values based on n
             max_gf_value_str_len = len(str(2**args.n - 1))
             for i, block in enumerate(watermark_blocks_info):
-                print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
+                print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
             
             # Decoding
-            print(f"\n{'='*60}")
+            print(f"\n{'-'*60}")
             print("Decoding")
-            print(f"{'='*60}")
+            print(f"{'-'*60}")
         
         # Create decoder with same parameters
         decoder = LLMWatermarkDecoder(
@@ -206,7 +233,7 @@ def main():
         if args.verbose:
             print(f"Decoded {len(decoded_blocks)} blocks:")
             for i, block in enumerate(decoded_blocks):
-                print(f"  Block {i:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}")
+                print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}")
             
             # Compare encoder vs decoder results
             print(f"\nComparison (Watermark vs Encoded vs Decoded):")
@@ -226,12 +253,12 @@ def main():
                 # Check if watermark bits match decoded bits (watermark recovery success)
                 watermark_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'] else "✗"
                 
-                print(f"{i:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits']):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<8} {watermark_match}")
+                print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits']):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<8} {watermark_match}")
             
             # MCP Verification
-            print(f"\n{'='*60}")
+            print(f"\n{'-'*60}")
             print("MCP Watermark Verification")
-            print(f"{'='*60}")
+            print(f"{'-'*60}")
         
         # Create MCP solver
         mcp_solver = MCPSolver(gf=gf, n=args.n, verbose=args.verbose)
@@ -243,7 +270,6 @@ def main():
         
         if args.verbose:
             print(f"Verification Results:")
-            print(f"  Watermark Valid: {verification_result['is_valid']}")
             print(f"  Collinear Points: {verification_result['max_collinear_count']}/{verification_result['total_points']}")
             print(f"  Original a₀: {a0}")
             print(f"  Recovered a₀: {verification_result['recovered_a0']}")
@@ -252,13 +278,13 @@ def main():
             print(f"  Matching blocks: {verification_result['matching_blocks']}")
             
             if verification_result['is_valid']:
-                print(f"  ✅ Watermark successfully verified!")
+                print(f"✅ Watermark successfully verified!")
             else:
-                print(f"  ❌ Watermark verification failed!")
+                print(f"❌ Watermark verification failed!")
         else:
             # Compact output for non-verbose mode
             status = "✅ VALID" if verification_result['is_valid'] else "❌ INVALID"
-            print(f"Watermark Verification: {status} (Points: {verification_result['max_collinear_count']}/{verification_result['total_points']}, Matching: {verification_result['matching_blocks']})")
+            print(f"Watermark Verification: {status} (Collinear points: {verification_result['max_collinear_count']}/{verification_result['total_points']}, Matching: {verification_result['matching_blocks']})")
 
         # Collect statistics for this prompt run
         stats_df.loc[prompt_idx, 'field_size'] = 2 ** args.n
@@ -278,24 +304,34 @@ def main():
         stats_df.loc[prompt_idx, 'decoding_time'] = decoding_time
         stats_df.loc[prompt_idx, 'mcp_time'] = mcp_time
 
-    # Export statistics to CSV
+    # Apply proper data types to all columns
+    for col, dtype in column_dtypes.items():
+        if col in stats_df.columns:
+            try:
+                stats_df[col] = stats_df[col].astype(dtype)
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Could not convert column '{col}' to {dtype}: {e}")
+                # Keep original type if conversion fails
+    
+    # Export statistics to both CSV and Parquet formats
     stats_df.to_csv(stats_file, index=False)
+    stats_df.to_parquet(stats_parquet_file, index=False)
+    
     print(f"\n{'='*60}")
-    print(f"Statistics saved to: {stats_file}")
+    print(f"Statistics saved to:")
+    print(f"  CSV: {stats_file} ({os.path.getsize(stats_file):,} bytes)")
+    print(f"  Parquet: {stats_parquet_file} ({os.path.getsize(stats_parquet_file):,} bytes)")
     
     if args.stats:
-        # Calculate success rate safely
-        successful_recoveries = int(stats_df['watermark_recovered'].sum())
-        success_rate = successful_recoveries / total_prompts if total_prompts > 0 else 0.0
-        
         print(f"\nStatistics Summary:")
-        print(f"Total prompts processed: {total_prompts}")
-        print(f"Successful watermark recoveries: {successful_recoveries}")
-        print(f"Watermark success rate: {success_rate:.2%}")
-        print(f"Average matching blocks: {stats_df['matching_blocks'].mean():.2f}")
-        print(f"Average timing - Encoding: {stats_df['encoding_time'].mean():.3f}s")
-        print(f"Decoding: {stats_df['decoding_time'].mean():.3f}s")
-        print(f"MCP: {stats_df['mcp_time'].mean():.3f}s")
+        print(f"  Total prompts processed: {total_prompts}")
+        print(f"  Successful watermark recoveries: {stats_df['watermark_recovered'].sum()}")
+        print(f"  Watermark success rate: {stats_df['watermark_recovered'].mean():.2%}")
+        print(f"  Average matching blocks: {stats_df['matching_blocks'].mean():.2f}")
+        print(f"  Average timing:")
+        print(f"  Encoding: {stats_df['encoding_time'].mean():.3f}s")
+        print(f"  Decoding: {stats_df['decoding_time'].mean():.3f}s")
+        print(f"  MCP: {stats_df['mcp_time'].mean():.3f}s\n")
 
 
 if __name__ == "__main__":
