@@ -855,7 +855,7 @@ class MCPSolver:
         
         return a0, a1
     
-    def verify_watermark(self, decoded_blocks: List[Dict], original_a0: object, original_a1: object) -> Dict:
+    def verify_watermark(self, decoded_blocks: List[Dict], original_a0: object, original_a1: object, watermark_blocks: List[Dict] = None) -> Dict:
         """
         Complete watermark verification pipeline.
         
@@ -863,24 +863,25 @@ class MCPSolver:
             decoded_blocks: List of decoded blocks from LLMWatermarkDecoder
             original_a0: Original a₀ coefficient (GF element)
             original_a1: Original a₁ coefficient (GF element)
+            watermark_blocks: Optional list of original watermark blocks for matching count
             
         Returns:
             Dictionary containing:
             - 'is_valid': Boolean indicating if watermark is valid
-            - 'confidence_score': Float between 0 and 1
             - 'recovered_a0': Recovered a₀ coefficient
             - 'recovered_a1': Recovered a₁ coefficient
             - 'max_collinear_count': Number of points on the best line
             - 'total_points': Total number of points analyzed
+            - 'matching_blocks': Number of blocks that match between watermark and decoded
         """
         if not decoded_blocks:
             return {
                 'is_valid': False,
-                'confidence_score': 0.0,
                 'recovered_a0': None,
                 'recovered_a1': None,
                 'max_collinear_count': 0,
-                'total_points': 0
+                'total_points': 0,
+                'matching_blocks': 0
             }
         
         # Extract (x, y) points as integers
@@ -896,11 +897,11 @@ class MCPSolver:
         if max_count < 2:
             return {
                 'is_valid': False,
-                'confidence_score': 0.0,
                 'recovered_a0': None,
                 'recovered_a1': None,
                 'max_collinear_count': max_count,
-                'total_points': len(points)
+                'total_points': len(points),
+                'matching_blocks': 0
             }
         
         # Recover line equation
@@ -911,29 +912,34 @@ class MCPSolver:
                 print(f"Failed to recover line equation: {e}")
             return {
                 'is_valid': False,
-                'confidence_score': 0.0,
                 'recovered_a0': None,
                 'recovered_a1': None,
                 'max_collinear_count': max_count,
-                'total_points': len(points)
+                'total_points': len(points),
+                'matching_blocks': 0
             }
         
         # Check if recovered coefficients match original
         is_valid = (recovered_a0 == original_a0) and (recovered_a1 == original_a1)
         
-        # Calculate confidence score based on the ratio of collinear points
-        confidence_score = max_count / len(points)
+        # Calculate matching blocks if watermark_blocks provided
+        matching_blocks = 0
+        if watermark_blocks and decoded_blocks:
+            min_blocks = min(len(watermark_blocks), len(decoded_blocks))
+            for i in range(min_blocks):
+                if watermark_blocks[i]['y_bits'] == decoded_blocks[i]['y_bits']:
+                    matching_blocks += 1
         
         if self.verbose:
             print(f"Recovered line: f(x) = {recovered_a0} + {recovered_a1}*x")
             print(f"Match: a₀={recovered_a0 == original_a0}, a₁={recovered_a1 == original_a1}")
-            print(f"Confidence: {confidence_score:.3f} ({max_count}/{len(points)} points)")
+            print(f"Matching blocks: {matching_blocks}/{len(decoded_blocks) if decoded_blocks else 0}")
         
         return {
             'is_valid': is_valid,
-            'confidence_score': confidence_score,
             'recovered_a0': recovered_a0,
             'recovered_a1': recovered_a1,
             'max_collinear_count': max_count,
-            'total_points': len(points)
+            'total_points': len(points),
+            'matching_blocks': matching_blocks
         }

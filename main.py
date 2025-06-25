@@ -4,6 +4,11 @@ import secrets
 import random
 import numpy as np
 import torch
+import pandas as pd
+import json
+import os
+import time
+from datetime import datetime
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder, MCPSolver
@@ -28,6 +33,7 @@ def main():
     parser.add_argument("--hash-window", type=int, default=1, help="Number of previous tokens to hash together (default: 1)") 
     parser.add_argument("--n-prompts", type=int, default=1, help="Number of prompts to process (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
+    parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
 
     args = parser.parse_args()
 
@@ -118,25 +124,52 @@ def main():
         print(f"Using dataset: {dataset_name}")
         print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
 
-    for prompt_idx, prompt in enumerate(prompts, 1):
+    # Create dynamic output directory and file path
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_name_clean = args.model.replace("/", "_")
+    dataset_name_clean = dataset_name.replace("/", "_")
+    
+    output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_{timestamp}"
+    output_dir = os.path.join("output", output_subdir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    stats_file = os.path.join(output_dir, "statistics.csv")
+    
+    # Initialize DataFrame with all required columns
+    columns = [
+        'field_size', 'prompt', 'generated_text', 'token_length', 
+        'a0', 'a1', 'recovered_a0', 'recovered_a1', 'secret_key',
+        'watermark_blocks', 'decoded_blocks', 'matching_blocks', 
+        'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
+    ]
+    
+    stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
+    
+    if args.verbose:
+        print(f"Statistics will be saved to: {stats_file}")
+
+    for prompt_idx, prompt in enumerate(prompts, 0):
         if total_prompts > 1:
             print(f"\n{'='*60}")
-            print(f"Processing Prompt {prompt_idx}/{total_prompts}")
+            print(f"Processing Prompt {prompt_idx+1}/{total_prompts}")
             if args.verbose:
                 print(f"{'='*60}")
                 print(f"Prompt preview: {prompt[:100] + '...' if len(prompt) > 100 else prompt}\n")
         
         if args.verbose:
-            # Decoding
+            # Encoding
             print(f"\n{'='*60}")
             print("Encoding")
             print(f"{'='*60}")
 
+        # Time encoding
+        encoding_start = time.time()
         full_text, generated_only_text, formatted_prompt, statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
             max_new_tokens=args.max_tokens,
             verbose=args.verbose
         )
+        encoding_time = time.time() - encoding_start
         
         if args.verbose:
             print(f"{'-'*60}")
@@ -165,8 +198,10 @@ def main():
             verbose=args.verbose
         )
         
-        # Decode the generated text (using only the generated portion)
+        # Time decoding
+        decoding_start = time.time()
         decoded_blocks = decoder.decode_text(generated_only_text)
+        decoding_time = time.time() - decoding_start
         
         if args.verbose:
             print(f"Decoded {len(decoded_blocks)} blocks:")
@@ -201,18 +236,20 @@ def main():
         # Create MCP solver
         mcp_solver = MCPSolver(gf=gf, n=args.n, verbose=args.verbose)
         
-        # Verify watermark
-        verification_result = mcp_solver.verify_watermark(decoded_blocks, a0, a1)
+        # Time MCP verification
+        mcp_start = time.time()
+        verification_result = mcp_solver.verify_watermark(decoded_blocks, a0, a1, watermark_blocks_info)
+        mcp_time = time.time() - mcp_start
         
         if args.verbose:
             print(f"Verification Results:")
             print(f"  Watermark Valid: {verification_result['is_valid']}")
-            print(f"  Confidence Score: {verification_result['confidence_score']:.3f}")
             print(f"  Collinear Points: {verification_result['max_collinear_count']}/{verification_result['total_points']}")
             print(f"  Original a₀: {a0}")
             print(f"  Recovered a₀: {verification_result['recovered_a0']}")
             print(f"  Original a₁: {a1}")
             print(f"  Recovered a₁: {verification_result['recovered_a1']}")
+            print(f"  Matching blocks: {verification_result['matching_blocks']}")
             
             if verification_result['is_valid']:
                 print(f"  ✅ Watermark successfully verified!")
@@ -221,7 +258,44 @@ def main():
         else:
             # Compact output for non-verbose mode
             status = "✅ VALID" if verification_result['is_valid'] else "❌ INVALID"
-            print(f"Watermark Verification: {status} (Confidence: {verification_result['confidence_score']:.3f}, Points: {verification_result['max_collinear_count']}/{verification_result['total_points']})")
+            print(f"Watermark Verification: {status} (Points: {verification_result['max_collinear_count']}/{verification_result['total_points']}, Matching: {verification_result['matching_blocks']})")
+
+        # Collect statistics for this prompt run
+        stats_df.loc[prompt_idx, 'field_size'] = 2 ** args.n
+        stats_df.loc[prompt_idx, 'prompt'] = prompt
+        stats_df.loc[prompt_idx, 'generated_text'] = generated_only_text
+        stats_df.loc[prompt_idx, 'token_length'] = len(watermarker.tokenizer.encode(generated_only_text))
+        stats_df.loc[prompt_idx, 'a0'] = int(a0)
+        stats_df.loc[prompt_idx, 'a1'] = int(a1)
+        stats_df.loc[prompt_idx, 'recovered_a0'] = int(verification_result['recovered_a0']) if verification_result['recovered_a0'] is not None else None
+        stats_df.loc[prompt_idx, 'recovered_a1'] = int(verification_result['recovered_a1']) if verification_result['recovered_a1'] is not None else None
+        stats_df.loc[prompt_idx, 'secret_key'] = secret_key
+        stats_df.loc[prompt_idx, 'watermark_blocks'] = json.dumps(watermark_blocks_info)
+        stats_df.loc[prompt_idx, 'decoded_blocks'] = json.dumps(decoded_blocks)
+        stats_df.loc[prompt_idx, 'matching_blocks'] = verification_result['matching_blocks']
+        stats_df.loc[prompt_idx, 'watermark_recovered'] = verification_result['is_valid']
+        stats_df.loc[prompt_idx, 'encoding_time'] = encoding_time
+        stats_df.loc[prompt_idx, 'decoding_time'] = decoding_time
+        stats_df.loc[prompt_idx, 'mcp_time'] = mcp_time
+
+    # Export statistics to CSV
+    stats_df.to_csv(stats_file, index=False)
+    print(f"\n{'='*60}")
+    print(f"Statistics saved to: {stats_file}")
+    
+    if args.stats:
+        # Calculate success rate safely
+        successful_recoveries = int(stats_df['watermark_recovered'].sum())
+        success_rate = successful_recoveries / total_prompts if total_prompts > 0 else 0.0
+        
+        print(f"\nStatistics Summary:")
+        print(f"Total prompts processed: {total_prompts}")
+        print(f"Successful watermark recoveries: {successful_recoveries}")
+        print(f"Watermark success rate: {success_rate:.2%}")
+        print(f"Average matching blocks: {stats_df['matching_blocks'].mean():.2f}")
+        print(f"Average timing - Encoding: {stats_df['encoding_time'].mean():.3f}s")
+        print(f"Decoding: {stats_df['decoding_time'].mean():.3f}s")
+        print(f"MCP: {stats_df['mcp_time'].mean():.3f}s")
 
 
 if __name__ == "__main__":
