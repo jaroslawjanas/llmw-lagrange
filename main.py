@@ -47,6 +47,17 @@ def main():
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+
+    # Determine device
+    if args.no_cuda:
+        device = "cpu"
+        print(f"Device: {device} (CUDA disabled by --no-cuda flag)\n")
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda":
+            print(f"Device: {device} (CUDA available and enabled)\n")
+        else:
+            print(f"Device: {device} (CUDA not available, falling back to CPU)\n")
         
     # Create a Galois field of size 2^n
     field_size = 2 ** args.n
@@ -65,11 +76,7 @@ def main():
     # Generate a 64-bit secret key outside of the Galois field
     secret_key = secrets.token_hex(8)  # 8 bytes = 64 bits, displayed as 16 hexadecimal characters
     if args.verbose:
-        print(f"Generated 64-bit secret key: {secret_key}")
-
-
-    # Determine device
-    device = "cpu" if args.no_cuda else None
+        print(f"Generated 64-bit secret key: {secret_key}\n")
     
     # Create watermarker instance
     watermarker = LLMWatermarkEncoder(
@@ -192,7 +199,7 @@ def main():
         if args.verbose:
             print(f"{'-'*60}")
             print(f"\nPrompt:\n{prompt}")
-            print(f"\nGenerated text:\n{full_text}")
+            print(f"\nGenerated text:\n{generated_only_text}")
 
             print(f"\n{'-'*60}")
 
@@ -222,6 +229,7 @@ def main():
             gf=gf,
             green_list_fraction=args.green_fraction,
             seed=args.seed,
+            device=device,
             verbose=args.verbose
         )
         

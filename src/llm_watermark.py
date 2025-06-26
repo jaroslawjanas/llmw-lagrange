@@ -40,6 +40,7 @@ class LLMWatermarkerBase(ABC):
         green_list_fraction: float = 0.5,
         seed: int = 4242,
         cache_dir: str = paths.CACHE_DIR,
+        device: Optional[str] = "cpu",
         verbose: bool = False,
     ):
         """
@@ -53,6 +54,8 @@ class LLMWatermarkerBase(ABC):
             green_list_fraction: Fraction of tokens to include in green list (default: 0.5)
             seed: Random seed for reproducibility
             cache_dir: Directory to cache models
+            device: Device to run on ('cuda', 'cpu', or None for auto-detection)
+            verbose: Whether to show detailed output
         """
         self.model_name = model_name
         self.secret_key = secret_key
@@ -61,6 +64,7 @@ class LLMWatermarkerBase(ABC):
         self.green_list_fraction = green_list_fraction
         self.seed = seed
         self.cache_dir = cache_dir
+        self.device = device
         self.verbose = verbose
         
         # Load tokenizer (shared by both encoder and decoder)
@@ -154,7 +158,7 @@ class LLMWatermarkerBase(ABC):
         # Convert to GF(2^n) element
         return self.gf(int_value)
     
-    def _get_red_green_tokens(self, token_id: int, secret_key: str) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_red_green_tokens(self, token_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Generate red and green token lists based on the hash of a token and secret key.
         This creates a deterministic division of the vocabulary into "green" and "red" tokens.
@@ -167,7 +171,7 @@ class LLMWatermarkerBase(ABC):
             Tuple of (green_tokens, red_tokens) as tensors
         """
         # Create a hash from the token ID and secret key
-        hash_input = f"{token_id}-{secret_key}"
+        hash_input = f"{token_id}-{self.secret_key}"
         hash_object = hashlib.sha256(hash_input.encode())
         hash_hex = hash_object.hexdigest()
         
@@ -178,39 +182,23 @@ class LLMWatermarkerBase(ABC):
         # Get the total number of tokens in the model's vocabulary
         vocab_size = len(self.tokenizer)
         
-        # Create a tensor containing all possible token indices (0 to vocab_size-1)
-        # Example: if vocab_size is 3000, all_tokens becomes tensor([0, 1, 2, ..., 2999])
-        all_tokens = torch.arange(vocab_size)
+        # Create a generator and set its seed
+        rng_generator = torch.Generator(device=self.device)
+        rng_generator.manual_seed(hash_seed)
         
-        # PyTorch doesn't have a direct seeded shuffle operation, so we implement
-        # a deterministic shuffle using random values and sorting
+        # Use torch.randperm for efficient permutation generation
+        permutation = torch.randperm(
+            vocab_size,
+            generator=rng_generator,
+            requires_grad=False,
+            device=self.device
+        )
         
-        # Set PyTorch's random generator to use our hash-derived seed
-        # This makes the shuffling deterministic based on the input tokens
-        torch.manual_seed(hash_seed)
-        
-        # Create random values and sort them to generate a permutation of indices
-        # Example: random_values might be tensor([0.12, 0.95, 0.33, ...])
-        random_values = torch.rand(vocab_size)
-        # Sort these values to get a permutation tensor
-        # Example: permutation might be tensor([0, 2, 1, ...]) if 0.12 is smallest, 0.33 is next, etc.
-        _, permutation = torch.sort(random_values)
-        # Use this permutation to shuffle the token indices
-        # This creates a deterministic random ordering of all vocabulary tokens
-        shuffled_tokens = all_tokens[permutation]
-        
-        # Reset the random seed back to the original seed of the LLMWatermarker
-        # This prevents the temporary seed from affecting other random operations
-        torch.manual_seed(self.seed)
-        
-        # Split the shuffled tokens into "green" and "red" lists
-        # Green tokens will get a positive bias during generation
+        # Split the permuted indices into "green" and "red" lists
         split_point = int(vocab_size * self.green_list_fraction)
-        # Example: if green_list_fraction is 0.5 and vocab_size is 3000,
-        # the first 1500 tokens in shuffled_tokens become green tokens
-        green_tokens = shuffled_tokens[:split_point]  # Keep as tensor for efficiency
-        # The remaining tokens become red tokens
-        red_tokens = shuffled_tokens[split_point:]    # Keep as tensor for efficiency
+
+        green_tokens = permutation[:split_point]
+        red_tokens = permutation[split_point:]
         
         return green_tokens, red_tokens
 
@@ -225,10 +213,10 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         gf: object,
         green_list_fraction: float = 0.5,
         bias: float = 6.0,
-        seed: int = 4242,
+        seed: int = 42,
         cache_dir: str = paths.CACHE_DIR,
-        device: Optional[str] = None,
-        context_window: int = 1024,
+        device: Optional[str] = "cpu",
+        context_window: int = 1500,
         temperature: float = 0.0,
         hash_window: int = 1,
         verbose: bool = False
@@ -252,7 +240,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             hash_window: Number of previous tokens to hash together (default: 1)
         """
         # Initialize base class
-        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, verbose)
+        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
         
         # Encoder-specific parameters
         self.line_fnc = line_fnc
@@ -260,15 +248,6 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         self.context_window = context_window
         self.temperature = temperature
         self.hash_window = hash_window
-        
-        # Set device
-        if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = device
-            
-        if self.verbose:
-            print(f"Using device: {self.device}")
         
         # Load model (tokenizer already loaded by base class)
         self._load_model()
@@ -341,7 +320,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         
         return tuple(trimmed_past)
         
-    def _modify_logits(self, logits: torch.Tensor, token_id: int, secret_key: str, bias_type: str) -> torch.Tensor:
+    def _modify_logits(self, logits: torch.Tensor, token_id: int, bias_type: str) -> torch.Tensor:
         """
         Modify logits by adding bias to either green or red tokens.
         This is the core watermarking function that biases the model's predictions
@@ -376,7 +355,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         # Get green and red tokens as tensors using the deterministic hash of previous token and secret key
         # Example: based on token_id 101 and secret key, this might return
         # green_tokens as tensor([42, 900, 5, ...]) and red_tokens (which we don't use here)
-        green_tokens, red_tokens = self._get_red_green_tokens(token_id, secret_key)
+        green_tokens, red_tokens = self._get_red_green_tokens(token_id)
         
         # Move tensors to the same device as logits
         green_tokens = green_tokens.to(logits.device)
@@ -540,7 +519,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                     current_previous_token = generated_ids[-1]
                 
                 # Modify logits with watermark using the current previous token and secret key
-                modified_logits = self._modify_logits(logits, current_previous_token, self.secret_key, bias_type)
+                modified_logits = self._modify_logits(logits, current_previous_token, bias_type)
                 
                 # Apply temperature if set
                 if self.temperature > 0:
@@ -560,14 +539,13 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 
                 # Track whether the selected token was from the green or red list for watermark statistics
                 # Get the current division of tokens into green and red based on previous token and secret key
-                green_tokens, red_tokens = self._get_red_green_tokens(current_previous_token, self.secret_key)
+                green_tokens, red_tokens = self._get_red_green_tokens(current_previous_token)
                 
                 # Check vocabulary bounds for safety
                 vocab_size = len(self.tokenizer)
                 if next_token_id < vocab_size:  # Make sure token is in vocabulary range
                     # Create a tensor from the next token ID to enable vectorized comparison
-                    # Make sure it's on the same device as green_tokens
-                    next_token_tensor = torch.tensor(next_token_id, device=green_tokens.device)
+                    next_token_tensor = torch.tensor(next_token_id, device=self.device)
                     
                     # Use tensor operations to efficiently check if the token is in the green list
                     is_green = (green_tokens == next_token_tensor).any().item()
@@ -641,6 +619,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         green_list_fraction: float = 0.5,
         seed: int = 4242,
         cache_dir: str = paths.CACHE_DIR,
+        device: Optional[str] = "cpu",
         verbose: bool = False,
     ):
         """
@@ -654,9 +633,11 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             green_list_fraction: Fraction of tokens in green list (same as used for encoding)
             seed: Random seed for reproducibility (same as used for encoding)
             cache_dir: Directory to cache models
+            device: Device to run on ('cuda', 'cpu')
+            verbose: Whether to show detailed output
         """
         # Initialize base class (loads tokenizer)
-        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, verbose)
+        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
         
     def decode_text(self, generated_only_text: str) -> List[Dict[str, Union[int, List[int]]]]:
         """
@@ -714,7 +695,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                     vocab_split_token = token_ids[start_idx + i - 1]
                 
                 # Get green and red token lists for this position
-                green_tokens, red_tokens = self._get_red_green_tokens(vocab_split_token, self.secret_key)
+                green_tokens, red_tokens = self._get_red_green_tokens(vocab_split_token)
                 
                 # Check if current token is in green list (1) or red list (0)
                 is_green = (green_tokens == token_id).any().item()
