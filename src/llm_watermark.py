@@ -69,6 +69,7 @@ class LLMWatermarkerBase(ABC):
         
         # Load tokenizer (shared by both encoder and decoder)
         self._load_tokenizer()
+        self.vocab_size = len(self.tokenizer)
         
     def _load_tokenizer(self):
         """Load the tokenizer."""
@@ -179,23 +180,20 @@ class LLMWatermarkerBase(ABC):
         # This ensures deterministic outcomes for the same input token and secret key
         hash_seed = int(hash_hex, 16) % (2**32)
         
-        # Get the total number of tokens in the model's vocabulary
-        vocab_size = len(self.tokenizer)
-        
         # Create a generator and set its seed
         rng_generator = torch.Generator(device=self.device)
         rng_generator.manual_seed(hash_seed)
         
         # Use torch.randperm for efficient permutation generation
         permutation = torch.randperm(
-            vocab_size,
+            self.vocab_size,
             generator=rng_generator,
             requires_grad=False,
             device=self.device
         )
         
         # Split the permuted indices into "green" and "red" lists
-        split_point = int(vocab_size * self.green_list_fraction)
+        split_point = int(self.vocab_size * self.green_list_fraction)
 
         green_tokens = permutation[:split_point]
         red_tokens = permutation[split_point:]
