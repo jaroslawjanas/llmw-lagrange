@@ -4,6 +4,9 @@ cache/
 # Output directory
 output/
 
+# Scripts output directory
+scripts/output/
+
 # Python bytecode
 __pycache__/
 *.py[cod]
