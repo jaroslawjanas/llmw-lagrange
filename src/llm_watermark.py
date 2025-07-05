@@ -422,7 +422,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="pt").to(self.device)
 
         # Store generated ids
-        generated_ids = input_ids.clone()[0].tolist()
+        all_ids = input_ids.clone()[0].tolist()
         
         # Initialize K/V cache
         past_key_values = None
@@ -436,16 +436,15 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least n ({self.n}) to generate at least one block.")
         
         # Setup progress tracking
-        total_tokens_to_generate = num_blocks * self.n
-        progress_bar = tqdm(range(total_tokens_to_generate))
+        progress_bar = tqdm(range(max_new_tokens))
         tokens_generated = 0
         
         # Generate tokens block by block
         for block_idx in range(num_blocks):
             # At the start of each block, determine the token to use for x-coordinate computation
-            if len(generated_ids) > len(input_ids[0]):
+            if len(all_ids) > len(input_ids[0]):
                 # Use the last generated token for subsequent blocks
-                previous_token_id = generated_ids[-1]
+                previous_token_id = all_ids[-1]
             else:
                 # Use 0 for the very first block instead of last prompt token
                 # This is because when running detection we do not have access to the prompt
@@ -476,14 +475,14 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 if past_key_values is None:
                     # First generation - use the full prompt
                     # Only use the last context_window tokens if needed
-                    if len(generated_ids) > self.context_window:
-                        model_input_ids = torch.tensor([generated_ids[-self.context_window:]], device=self.device)
+                    if len(all_ids) > self.context_window:
+                        model_input_ids = torch.tensor([all_ids[-self.context_window:]], device=self.device)
                         cache_position = 0  # Reset cache position if we truncate
                     else:
-                        model_input_ids = torch.tensor([generated_ids], device=self.device)
+                        model_input_ids = torch.tensor([all_ids], device=self.device)
                 else:
                     # Subsequent generations - only use the last generated token
-                    model_input_ids = torch.tensor([[generated_ids[-1]]], device=self.device)
+                    model_input_ids = torch.tensor([[all_ids[-1]]], device=self.device)
                     
                     # Check if we need to trim the cache due to context window limits
                     if cache_position >= self.context_window:
@@ -514,7 +513,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                     current_previous_token = 0
                 else:
                     # Use the previous generated token (never use prompt tokens)
-                    current_previous_token = generated_ids[-1]
+                    current_previous_token = all_ids[-1]
                 
                 # Modify logits with watermark using the current previous token and secret key
                 modified_logits = self._modify_logits(logits, current_previous_token, bias_type)
@@ -555,7 +554,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                         self.red_tokens_selected += 1
 
                 # Add the new token to generated ids
-                generated_ids.append(next_token_id)
+                all_ids.append(next_token_id)
                 block_info['tokens'].append(next_token_id)
                 tokens_generated += 1
                 
@@ -572,7 +571,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             self.blocks_encoded += 1
             
             # Check if we hit EOS in the middle of a block
-            if generated_ids[-1] == self.tokenizer.eos_token_id:
+            if all_ids[-1] == self.tokenizer.eos_token_id:
                 break
         
         progress_bar.close()
@@ -581,14 +580,14 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         prompt_length = len(input_ids[0])  # input_ids is a tensor with batch dimension
         
         # Split the generated_ids into prompt and generated portions
-        if len(generated_ids) > prompt_length:
-            generated_only_ids = generated_ids[prompt_length:]
+        if len(all_ids) > prompt_length:
+            generated_ids = all_ids[prompt_length:]
         else:
-            generated_only_ids = []  # No new tokens were generated
+            generated_ids = []  # No new tokens were generated
         
         # Decode both full text and generated-only text
-        full_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-        generated_only_text = self.tokenizer.decode(generated_only_ids, skip_special_tokens=True) if generated_only_ids else ""
+        full_text = self.tokenizer.decode(all_ids, skip_special_tokens=True)
+        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True) if generated_ids else ""
         
         # Create statistics dictionary
         statistics = {
@@ -599,7 +598,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             'green_ratio': self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
         }
 
-        return full_text, generated_only_text, formatted_prompt, statistics, watermark_blocks_info
+        return full_text, generated_text, formatted_prompt, statistics, watermark_blocks_info
 
 
 class LLMWatermarkDecoder(LLMWatermarkerBase):
@@ -637,12 +636,12 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
         
-    def decode_text(self, generated_only_text: str) -> List[Dict[str, Union[int, List[int]]]]:
+    def decode_text(self, generated_text: str) -> List[Dict[str, Union[int, List[int]]]]:
         """
         Decode watermark information from generated text (without prompt).
         
         Args:
-            generated_only_text: The generated text to decode (prompt already removed)
+            generated_text: The generated text to decode (prompt already removed)
             
         Returns:
             List of blocks, each containing:
@@ -651,7 +650,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             - 'y': y-value as GF element converted to integer
         """
         # Tokenize the generated-only text directly without any formatting
-        token_ids = self.tokenizer.encode(generated_only_text, add_special_tokens=False)
+        token_ids = self.tokenizer.encode(generated_text, add_special_tokens=False)
         
         # Calculate number of complete blocks
         num_complete_blocks = len(token_ids) // self.n

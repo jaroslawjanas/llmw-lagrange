@@ -189,7 +189,7 @@ def main():
 
         # Time encoding
         encoding_start = time.time()
-        full_text, generated_only_text, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
+        full_text, generated_text, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
             max_new_tokens=args.max_tokens,
             verbose=args.verbose
@@ -199,7 +199,7 @@ def main():
         if args.verbose:
             print(f"{'-'*60}")
             print(f"\nPrompt:\n{prompt}")
-            print(f"\nGenerated text:\n{generated_only_text}")
+            print(f"\nGenerated text:\n{generated_text}")
 
             print(f"\n{'-'*60}")
 
@@ -235,7 +235,7 @@ def main():
         
         # Time decoding
         decoding_start = time.time()
-        decoded_blocks = decoder.decode_text(generated_only_text)
+        decoded_blocks = decoder.decode_text(generated_text)
         decoding_time = time.time() - decoding_start
         
         if args.verbose:
@@ -297,8 +297,8 @@ def main():
         # Collect statistics for this prompt run
         stats_df.loc[prompt_idx, 'field_size'] = 2 ** args.n
         stats_df.loc[prompt_idx, 'prompt'] = prompt
-        stats_df.loc[prompt_idx, 'generated_text'] = generated_only_text
-        stats_df.loc[prompt_idx, 'token_length'] = len(watermarker.tokenizer.encode(generated_only_text))
+        stats_df.loc[prompt_idx, 'generated_text'] = generated_text
+        stats_df.loc[prompt_idx, 'token_length'] = len(watermarker.tokenizer.encode(generated_text))
         stats_df.loc[prompt_idx, 'a0'] = int(a0)
         stats_df.loc[prompt_idx, 'a1'] = int(a1)
         stats_df.loc[prompt_idx, 'recovered_a0'] = int(verification_result['recovered_a0']) if verification_result['recovered_a0'] is not None else None
