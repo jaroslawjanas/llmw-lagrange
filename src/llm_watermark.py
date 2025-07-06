@@ -858,10 +858,7 @@ class MCPSolver:
                     # Vertical line - skip as mentioned in the paper
                     continue
                 
-                # slope = (y_j - y_i) / (x_j - x_i) in GF
-                numerator = y_j - y_i
-                denominator = x_j - x_i
-                slope = numerator * pow(denominator, -1)  # GF division using multiplicative inverse
+                slope = (y_j - y_i) / (x_j - x_i)
                 
                 # Convert slope to integer for hashing
                 slope_key = int(slope)
