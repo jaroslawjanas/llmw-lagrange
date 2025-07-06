@@ -1,6 +1,6 @@
 import argparse
 import galois
-import secrets
+import hashlib
 import random
 import numpy as np
 import torch
@@ -64,8 +64,8 @@ def main():
     gf = galois.GF(field_size)
     
     # Generate two random numbers in the Galois field
-    a0 = gf.Random()
-    a1 = gf.Random()
+    a0 = gf.Random(seed=args.seed)
+    a1 = gf.Random(seed=args.seed + 1)
     if args.verbose:
         print(f"Generated random numbers in GF(2^{args.n}): a0 = {a0}, a1 = {a1}")
         print(f"K = {a0}|{a1}\n")
@@ -73,10 +73,12 @@ def main():
     # Create an anonymous function y = x * a1 + a0
     line_fnc = lambda x: x * a1 + a0
     
-    # Generate a 64-bit secret key outside of the Galois field
-    secret_key = secrets.token_hex(8)  # 8 bytes = 64 bits, displayed as 16 hexadecimal characters
+    # Generate a deterministic 64-bit secret key based on seed
+    seed_str = f"secret_key_{args.seed}"
+    hash_obj = hashlib.sha256(seed_str.encode())
+    secret_key = hash_obj.hexdigest()[:16]  # Take first 16 hex chars (64 bits)
     if args.verbose:
-        print(f"Generated 64-bit secret key: {secret_key}\n")
+        print(f"Generated seed based 64-bit secret key: {secret_key}\n")
     
     # Create watermarker instance
     watermarker = LLMWatermarkEncoder(

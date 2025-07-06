@@ -582,6 +582,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         # Split the generated_ids into prompt and generated portions
         if len(all_ids) > prompt_length:
             generated_ids = all_ids[prompt_length:]
+            assert len(generated_ids) == tokens_generated
         else:
             generated_ids = []  # No new tokens were generated
         
