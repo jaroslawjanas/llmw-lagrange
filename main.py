@@ -1,6 +1,5 @@
 import argparse
 import galois
-import hashlib
 import random
 import numpy as np
 import torch
@@ -74,9 +73,8 @@ def main():
     line_fnc = lambda x: x * a1 + a0
     
     # Generate a deterministic 64-bit secret key based on seed
-    seed_str = f"secret_key_{args.seed}"
-    hash_obj = hashlib.sha256(seed_str.encode())
-    secret_key = hash_obj.hexdigest()[:16]  # Take first 16 hex chars (64 bits)
+    secret_key_int = random.getrandbits(64)
+    secret_key = f"{secret_key_int:016x}"  # Format as 16-character hex string
     if args.verbose:
         print(f"Generated seed based 64-bit secret key: {secret_key}\n")
     
