@@ -619,6 +619,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         cache_dir: str = paths.CACHE_DIR,
         device: Optional[str] = "cpu",
         verbose: bool = False,
+        error_correction: bool = False,
     ):
         """
         Initialize the decoder with the same parameters used for encoding.
@@ -633,9 +634,11 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             cache_dir: Directory to cache models
             device: Device to run on ('cuda', 'cpu')
             verbose: Whether to show detailed output
+            error_correction: Whether to generate single-bit error correction variants
         """
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
+        self.error_correction = error_correction
         
     def decode_text(self, generated_text: str) -> List[Dict[str, Union[int, List[int]]]]:
         """
@@ -712,7 +715,90 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             progress_bar.update(1)
         
         progress_bar.close()
-        return blocks, decoded_tokens_length
+        
+        # Generate error correction variants if enabled
+        if self.error_correction:
+            if self.verbose:
+                print(f"Generating error correction variants for {len(blocks)} blocks...")
+            
+            # Start with original blocks
+            all_blocks = blocks.copy()
+            
+            # Setup progress tracking for variant generation
+            variant_progress_bar = tqdm(blocks, desc="Generating Error Correction Variants")
+            
+            # Generate variants for each original block
+            for block in variant_progress_bar:
+                variants = self.generate_single_bit_error_variants(block)
+                all_blocks.extend(variants)
+            
+            variant_progress_bar.close()
+            
+            if self.verbose:
+                print(f"Generated {len(all_blocks)} total blocks ({len(blocks)} original + {len(all_blocks) - len(blocks)} variants)")
+            
+            return all_blocks, decoded_tokens_length
+        else:
+            return blocks, decoded_tokens_length
+    
+    def generate_single_bit_error_variants(self, block: Dict[str, Union[int, List[int]]]) -> List[Dict[str, Union[int, List[int]]]]:
+        """
+        Generate all possible block variants where exactly one bit in y_bits is flipped.
+        This is useful for error correction scenarios where we suspect a single bit error.
+        
+        Args:
+            block: A single decoded block containing:
+                - 'x': x-coordinate (GF element as integer)
+                - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
+                - 'y': y-value as GF element converted to integer
+                
+        Returns:
+            List of variant blocks, each with one bit flipped:
+            - 'x': Same x-coordinate as input
+            - 'y_bits': Binary sequence with one bit flipped
+            - 'y': New y-value as GF element matching the flipped y_bits
+        """
+        # Input validation
+        if not isinstance(block, dict):
+            raise ValueError("Block must be a dictionary")
+        
+        required_keys = {'x', 'y_bits', 'y'}
+        if not all(key in block for key in required_keys):
+            raise ValueError(f"Block must contain keys: {required_keys}")
+        
+        y_bits = block['y_bits']
+        if not isinstance(y_bits, list):
+            raise ValueError("y_bits must be a list")
+        
+        if len(y_bits) != self.n:
+            raise ValueError(f"y_bits must have exactly {self.n} bits, got {len(y_bits)}")
+        
+        if not all(bit in [0, 1] for bit in y_bits):
+            raise ValueError("y_bits must contain only 0s and 1s")
+        
+        # Generate variants by flipping each bit position
+        variants = []
+        
+        for flip_position in range(self.n):
+            # Create a copy of the original y_bits
+            flipped_y_bits = y_bits.copy()
+            
+            # Flip the bit at the current position (0→1, 1→0)
+            flipped_y_bits[flip_position] = 1 - flipped_y_bits[flip_position]
+            
+            # Convert the new y_bits to a GF element
+            new_y_gf = self._binary_to_gf(flipped_y_bits)
+            
+            # Create the variant block
+            variant = {
+                'x': block['x'],  # x-coordinate remains the same
+                'y_bits': flipped_y_bits,
+                'y': int(new_y_gf)
+            }
+            
+            variants.append(variant)
+        
+        return variants
 
 
 class MCPSolver:

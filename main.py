@@ -33,6 +33,7 @@ def main():
     parser.add_argument("--n-prompts", type=int, default=1, help="Number of prompts to process (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
+    parser.add_argument("--error-correction", action="store_true", help="Enable single-bit error correction by generating variants for each decoded block")
 
     args = parser.parse_args()
 
@@ -230,7 +231,8 @@ def main():
             green_list_fraction=args.green_fraction,
             seed=args.seed,
             device=device,
-            verbose=args.verbose
+            verbose=args.verbose,
+            error_correction=args.error_correction
         )
         
         # Time decoding
