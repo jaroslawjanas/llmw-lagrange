@@ -652,7 +652,8 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         """
         # Tokenize the generated-only text directly without any formatting
         token_ids = self.tokenizer.encode(generated_text, add_special_tokens=False)
-        
+        decoded_tokens_length = len(token_ids)
+
         # Calculate number of complete blocks
         num_complete_blocks = len(token_ids) // self.n
         
@@ -711,7 +712,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             progress_bar.update(1)
         
         progress_bar.close()
-        return blocks
+        return blocks, decoded_tokens_length
 
 
 class MCPSolver:

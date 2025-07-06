@@ -145,7 +145,7 @@ def main():
     
     # Initialize DataFrame with all required columns
     columns = [
-        'field_size', 'prompt', 'generated_text', 'token_length', 
+        'field_size', 'prompt', 'generated_text', 'tokens_length', 
         'a0', 'a1', 'recovered_a0', 'recovered_a1', 'secret_key',
         'watermark_blocks', 'decoded_blocks', 'matching_blocks', 
         'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
@@ -156,7 +156,7 @@ def main():
         'field_size': 'int64',
         'prompt': 'string',
         'generated_text': 'string', 
-        'token_length': 'int64',
+        'tokens_length': 'int64',
         'a0': 'int64',
         'a1': 'int64',
         'recovered_a0': 'Int64',  # Nullable integer for None values
@@ -235,7 +235,7 @@ def main():
         
         # Time decoding
         decoding_start = time.time()
-        decoded_blocks = decoder.decode_text(generated_text)
+        decoded_blocks, decoded_tokens_length = decoder.decode_text(generated_text)
         decoding_time = time.time() - decoding_start
         
         if args.verbose:
@@ -298,7 +298,7 @@ def main():
         stats_df.loc[prompt_idx, 'field_size'] = 2 ** args.n
         stats_df.loc[prompt_idx, 'prompt'] = prompt
         stats_df.loc[prompt_idx, 'generated_text'] = generated_text
-        stats_df.loc[prompt_idx, 'token_length'] = len(watermarker.tokenizer.encode(generated_text))
+        stats_df.loc[prompt_idx, 'tokens_length'] = decoded_tokens_length
         stats_df.loc[prompt_idx, 'a0'] = int(a0)
         stats_df.loc[prompt_idx, 'a1'] = int(a1)
         stats_df.loc[prompt_idx, 'recovered_a0'] = int(verification_result['recovered_a0']) if verification_result['recovered_a0'] is not None else None
