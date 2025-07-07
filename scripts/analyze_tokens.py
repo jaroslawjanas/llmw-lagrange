@@ -50,7 +50,7 @@ def analyze_token_experiments(min_tokens: int = 704):
             df['output_folder'] = dataset_info['directory']
             
             # Analyze this specific folder for minimum tokens
-            folder_target_df = df[df['token_length'] >= min_tokens].copy()
+            folder_target_df = df[df['tokens_length'] >= min_tokens].copy()
             
             # Always create folder analysis entry, even if no target-token experiments
             if len(folder_target_df) > 0:
@@ -117,13 +117,13 @@ def analyze_token_experiments(min_tokens: int = 704):
     print(f"Total experiments across all folders: {len(combined_df)}")
     
     # Filter for minimum tokens
-    filtered_df = combined_df[combined_df['token_length'] >= min_tokens].copy()
+    filtered_df = combined_df[combined_df['tokens_length'] >= min_tokens].copy()
     
     print(f"Total experiments with >= {min_tokens} tokens: {len(filtered_df)}")
     
     if len(filtered_df) == 0:
         print(f"No experiments found with >= {min_tokens} tokens.")
-        print(f"Available token lengths: {sorted(combined_df['token_length'].unique())}")
+        print(f"Available token lengths: {sorted(combined_df['tokens_length'].unique())}")
         return None, None, None
     
     # Analyze watermark success

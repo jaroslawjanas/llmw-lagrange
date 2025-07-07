@@ -69,12 +69,12 @@ def export_failed_watermarks(min_tokens: int = 704, output_file: Optional[str] =
     print(f"Total experiments across all folders: {len(combined_df)}")
     
     # Filter for minimum tokens
-    filtered_df = combined_df[combined_df['token_length'] >= min_tokens].copy()
+    filtered_df = combined_df[combined_df['tokens_length'] >= min_tokens].copy()
     print(f"Experiments with >= {min_tokens} tokens: {len(filtered_df)}")
     
     if len(filtered_df) == 0:
         print(f"No experiments found with >= {min_tokens} tokens.")
-        print(f"Available token lengths: {sorted(combined_df['token_length'].unique())}")
+        print(f"Available token lengths: {sorted(combined_df['tokens_length'].unique())}")
         return None
     
     # Filter for failed watermarks
@@ -101,7 +101,7 @@ def export_failed_watermarks(min_tokens: int = 704, output_file: Optional[str] =
     export_columns = [
         'prompt',
         'generated_text', 
-        'token_length',
+        'tokens_length',
         'watermark_recovered',
         'matching_blocks',
         'model_name',
@@ -130,7 +130,7 @@ def export_failed_watermarks(min_tokens: int = 704, output_file: Optional[str] =
     export_df = failed_watermarks[available_export_columns].copy()
     
     # Sort by model, dataset, and token length for better organization
-    sort_columns = ['model_name', 'dataset_name', 'token_length']
+    sort_columns = ['model_name', 'dataset_name', 'tokens_length']
     export_df = export_df.sort_values(sort_columns)
     
     print(f"Export columns: {available_export_columns}")
@@ -161,7 +161,7 @@ def export_failed_watermarks(min_tokens: int = 704, output_file: Optional[str] =
         print(f"\nSummary by model and dataset:")
         summary = export_df.groupby(['model_name', 'dataset_name']).agg({
             'prompt': 'count',
-            'token_length': ['mean', 'min', 'max'],
+            'tokens_length': ['mean', 'min', 'max'],
             'matching_blocks': 'mean'
         }).round(2)
         
@@ -170,7 +170,7 @@ def export_failed_watermarks(min_tokens: int = 704, output_file: Optional[str] =
         
         # Print token length distribution
         print(f"\nToken length distribution of failed experiments:")
-        token_dist = export_df['token_length'].value_counts().sort_index()
+        token_dist = export_df['tokens_length'].value_counts().sort_index()
         print(token_dist.to_string())
         
         return export_df

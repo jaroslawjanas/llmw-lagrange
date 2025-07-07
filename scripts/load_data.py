@@ -241,7 +241,7 @@ class WatermarkDataLoader:
             'unique_prompts': df['prompt'].nunique() if 'prompt' in df.columns else 0,
             'watermark_success_rate': df['watermark_recovered'].mean() if 'watermark_recovered' in df.columns else None,
             'avg_matching_blocks': df['matching_blocks'].mean() if 'matching_blocks' in df.columns else None,
-            'avg_token_length': df['token_length'].mean() if 'token_length' in df.columns else None,
+            'avg_tokens_length': df['tokens_length'].mean() if 'tokens_length' in df.columns else None,
             'field_sizes': df['field_size'].unique().tolist() if 'field_size' in df.columns else [],
             'timing_stats': {}
         }
@@ -292,7 +292,7 @@ def main():
         print(f"  Total experiments: {summary['total_experiments']}")
         print(f"  Watermark success rate: {summary['watermark_success_rate']:.2%}" if summary['watermark_success_rate'] is not None else "  Watermark success rate: N/A")
         print(f"  Average matching blocks: {summary['avg_matching_blocks']:.2f}" if summary['avg_matching_blocks'] is not None else "  Average matching blocks: N/A")
-        print(f"  Average token length: {summary['avg_token_length']:.1f}" if summary['avg_token_length'] is not None else "  Average token length: N/A")
+        print(f"  Average token length: {summary['avg_tokens_length']:.1f}" if summary['avg_tokens_length'] is not None else "  Average token length: N/A")
         print(f"  Field sizes: {summary['field_sizes']}")
         
         # Parse JSON columns

@@ -40,7 +40,7 @@ The script generates a CSV file containing:
 ### Core Columns
 - `prompt`: The input prompt used for generation
 - `generated_text`: The watermarked text that was generated
-- `token_length`: Number of tokens in the generated text
+- `tokens_length`: Number of tokens in the generated text
 - `watermark_recovered`: Boolean indicating watermark recovery success (always False in this export)
 - `matching_blocks`: Number of watermark blocks that matched during detection
 
