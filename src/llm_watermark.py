@@ -22,6 +22,7 @@ from transformers import (
 from tqdm import tqdm
 from src.model_formatters import format_prompt_for_model
 from src.utils import load_hf_token
+from src.pm_galois import GaloisField, max_collinear_points, recover_line_equation
 import src.paths as paths
 
 
@@ -805,6 +806,10 @@ class MCPSolver:
     """
     Maximum Collinear Points solver for watermark verification.
     Implements the hashing-based algorithm with O(N²) complexity.
+
+    Contrary to the rest of the project this class uses Pawel's GF implementation
+    as the original galois package proved to be too slow. Rather to re-implement the entire galois
+    setup we simply modified this function to use a faster (Pawel's) implementation.
     """
     
     def __init__(self, gf: object, n: int, verbose: bool = False):
@@ -820,95 +825,51 @@ class MCPSolver:
         self.n = n
         self.verbose = verbose
     
-    def solve_mcp(self, points: List[Tuple[int, int]]) -> Tuple[int, object, List[Tuple[object, object]]]:
+    def solve_mcp(self, points: List[Tuple[int, int]]) -> Tuple[int, int, List[Tuple[int, int]]]:
         """
-        Solve the Maximum Collinear Points problem using hashing-based approach.
+        Solve the Maximum Collinear Points problem using the new GaloisField framework.
         
         Args:
             points: List of (x, y) tuples as integers
             
         Returns:
-            Tuple of (max_count, best_slope, collinear_points_gf)
+            Tuple of (max_count, best_slope, collinear_points)
             - max_count: Maximum number of collinear points found
-            - best_slope: Slope of the line with most points (GF element)
-            - collinear_points_gf: List of points on the best line as GF elements
+            - best_slope: Slope of the line with most points (as integer)
+            - collinear_points: List of points on the best line as integers
         """
         if len(points) < 2:
             return 0, None, []
         
-        # Convert integer points to GF elements
-        gf_points = [(self.gf(x), self.gf(y)) for x, y in points]
+        # Create a GaloisField instance for this field size
+        galois_field = GaloisField(self.n)
         
-        max_count = 1  # At least one point
-        best_slope = None
-        best_collinear_points = []
-        
-        # For each point as reference
-        for i, (x_i, y_i) in enumerate(gf_points):
-            # Hash map to store slopes and their corresponding points
-            slope_map = {}
-            
-            # Compare with all other points
-            for j, (x_j, y_j) in enumerate(gf_points):
-                if i == j:
-                    continue
-                
-                # Calculate slope in GF(2^n)
-                if x_j == x_i:
-                    # Vertical line - skip as mentioned in the paper
-                    continue
-                
-                slope = (y_j - y_i) / (x_j - x_i)
-                
-                # Convert slope to integer for hashing
-                slope_key = int(slope)
-                
-                # Add point to this slope's list
-                if slope_key not in slope_map:
-                    slope_map[slope_key] = []
-                slope_map[slope_key].append((x_j, y_j))
-            
-            # Check each slope for maximum count
-            for slope_key, slope_points in slope_map.items():
-                # Count includes the reference point plus all points with this slope
-                count = len(slope_points) + 1
-                
-                if count > max_count:
-                    max_count = count
-                    best_slope = self.gf(slope_key)
-                    # Include the reference point in the collinear points
-                    best_collinear_points = [(x_i, y_i)] + slope_points
+        # Use the new framework's max_collinear_points function
+        max_count, best_slope, collinear_points = max_collinear_points(points, galois_field)
         
         if self.verbose:
             print(f"Found maximum {max_count} collinear points with slope {best_slope}")
         
-        return max_count, best_slope, best_collinear_points
+        return max_count, best_slope, collinear_points
     
-    def recover_line_equation(self, collinear_points: List[Tuple[object, object]]) -> Tuple[object, object]:
+    def recover_line_equation(self, collinear_points: List[Tuple[int, int]]) -> Tuple[int, int]:
         """
-        Recover the line equation f(x) = a₀ + a₁x from collinear points.
+        Recover the line equation f(x) = a₀ + a₁x from collinear points using the new GaloisField framework.
         
         Args:
-            collinear_points: List of collinear points as GF elements
+            collinear_points: List of collinear points as integer tuples
             
         Returns:
-            Tuple of (a₀, a₁) as GF elements
+            Tuple of (a₀, a₁) as integers
         """
         if len(collinear_points) < 2:
             raise ValueError("Need at least 2 points to determine a line")
         
-        # Take the first two points to determine the line
-        (x1, y1) = collinear_points[0]
-        (x2, y2) = collinear_points[1]
+        # Create a GaloisField instance for this field size
+        galois_field = GaloisField(self.n)
         
-        if x1 == x2:
-            raise ValueError("Cannot determine line from vertical points")
-        
-        # Calculate slope: a₁ = (y₂ - y₁) / (x₂ - x₁)
-        a1 = (y2 - y1) * pow((x2 - x1), -1)
-        
-        # Calculate intercept: a₀ = y₁ - a₁ * x₁
-        a0 = y1 - a1 * x1
+        # Use the new framework's recover_line_equation function
+        a0, a1 = recover_line_equation(collinear_points, galois_field)
         
         return a0, a1
     
