@@ -661,8 +661,8 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         # Calculate number of complete blocks
         num_complete_blocks = len(token_ids) // self.n
         
-        if num_complete_blocks == 0:
-            return []  # No complete blocks to decode
+        if num_complete_blocks <= 1:
+            return [], 0  # No complete blocks to decode
         
         blocks = []
         
