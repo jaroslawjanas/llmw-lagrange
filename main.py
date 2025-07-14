@@ -33,10 +33,22 @@ def main():
     parser.add_argument("--n-prompts", type=int, default=1, help="Number of prompts to process (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
-    parser.add_argument("--error-correction", action="store_true", help="Enable single-bit error correction by generating variants for each decoded block")
+    parser.add_argument("--error-correction-k", type=int, default=0, help="Enable k-bit error correction by generating variants for each decoded block (0=disabled, must be < n)")
     parser.add_argument("--skip-detokenization", action="store_true", help="Use generated token IDs directly for decoding instead of detokenizing and retokenizing text")
 
     args = parser.parse_args()
+
+    # Validate error correction parameter and show warning
+    if args.error_correction_k >= args.n:
+        print(f"ERROR: error-correction-k ({args.error_correction_k}) must be less than n ({args.n})")
+        return 1
+    
+    if args.error_correction_k >= 3:
+        from math import comb
+        num_variants = comb(args.n, args.error_correction_k)
+        print(f"WARNING: Using {args.error_correction_k}-bit error correction will generate {num_variants:,} variants per block.")
+        print(f"         This may significantly increase memory usage and processing time.")
+        print(f"         Consider using smaller k values for large datasets.\n")
 
     # Set global cache
     paths.set_cache_dir(args.cache_dir)
@@ -233,7 +245,7 @@ def main():
             seed=args.seed,
             device=device,
             verbose=args.verbose,
-            error_correction=args.error_correction
+            error_correction_k=args.error_correction_k
         )
         
         # Time decoding

@@ -13,6 +13,7 @@ import numpy as np
 import time
 from typing import List, Tuple, Dict, Optional, Union
 from abc import ABC, abstractmethod
+from itertools import combinations
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -620,7 +621,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         cache_dir: str = paths.CACHE_DIR,
         device: Optional[str] = "cpu",
         verbose: bool = False,
-        error_correction: bool = False,
+        error_correction_k: int = 0,
     ):
         """
         Initialize the decoder with the same parameters used for encoding.
@@ -635,11 +636,18 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             cache_dir: Directory to cache models
             device: Device to run on ('cuda', 'cpu')
             verbose: Whether to show detailed output
-            error_correction: Whether to generate single-bit error correction variants
+            error_correction_k: Number of bits to flip for error correction (0 = disabled, must be < n)
         """
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
-        self.error_correction = error_correction
+        
+        # Validate error correction parameter
+        if error_correction_k < 0:
+            raise ValueError("error_correction_k must be non-negative")
+        if error_correction_k >= n:
+            raise ValueError(f"error_correction_k ({error_correction_k}) must be less than n ({n})")
+        
+        self.error_correction_k = error_correction_k
         
     def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> List[Dict[str, Union[int, List[int]]]]:
         """
@@ -726,19 +734,19 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         progress_bar.close()
         
         # Generate error correction variants if enabled
-        if self.error_correction:
+        if self.error_correction_k > 0:
             if self.verbose:
-                print(f"Generating error correction variants for {len(blocks)} blocks...")
+                print(f"Generating {self.error_correction_k}-bit error correction variants for {len(blocks)} blocks...")
             
             # Start with original blocks
             all_blocks = blocks.copy()
             
             # Setup progress tracking for variant generation
-            variant_progress_bar = tqdm(blocks, desc="Generating Error Correction Variants")
+            variant_progress_bar = tqdm(blocks, desc=f"Generating {self.error_correction_k}-bit Error Correction Variants")
             
             # Generate variants for each original block
             for block in variant_progress_bar:
-                variants = self.generate_single_bit_error_variants(block)
+                variants = self.generate_k_bit_error_variants(block, self.error_correction_k)
                 all_blocks.extend(variants)
             
             variant_progress_bar.close()
@@ -750,21 +758,22 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         else:
             return blocks, decoded_tokens_length
     
-    def generate_single_bit_error_variants(self, block: Dict[str, Union[int, List[int]]]) -> List[Dict[str, Union[int, List[int]]]]:
+    def generate_k_bit_error_variants(self, block: Dict[str, Union[int, List[int]]], k: int) -> List[Dict[str, Union[int, List[int]]]]:
         """
-        Generate all possible block variants where exactly one bit in y_bits is flipped.
-        This is useful for error correction scenarios where we suspect a single bit error.
+        Generate all possible block variants where exactly k bits in y_bits are flipped.
+        This is useful for error correction scenarios where we suspect k-bit errors.
         
         Args:
             block: A single decoded block containing:
                 - 'x': x-coordinate (GF element as integer)
                 - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
                 - 'y': y-value as GF element converted to integer
+            k: Number of bits to flip simultaneously (must be >= 1 and < n)
                 
         Returns:
-            List of variant blocks, each with one bit flipped:
+            List of variant blocks, each with exactly k bits flipped:
             - 'x': Same x-coordinate as input
-            - 'y_bits': Binary sequence with one bit flipped
+            - 'y_bits': Binary sequence with k bits flipped
             - 'y': New y-value as GF element matching the flipped y_bits
         """
         # Input validation
@@ -785,15 +794,22 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         if not all(bit in [0, 1] for bit in y_bits):
             raise ValueError("y_bits must contain only 0s and 1s")
         
-        # Generate variants by flipping each bit position
+        if k < 1:
+            raise ValueError(f"k must be at least 1, got {k}")
+        
+        if k >= self.n:
+            raise ValueError(f"k ({k}) must be less than n ({self.n})")
+        
+        # Generate all possible combinations of k bit positions to flip
         variants = []
         
-        for flip_position in range(self.n):
+        for flip_positions in combinations(range(self.n), k):
             # Create a copy of the original y_bits
             flipped_y_bits = y_bits.copy()
             
-            # Flip the bit at the current position (0→1, 1→0)
-            flipped_y_bits[flip_position] = 1 - flipped_y_bits[flip_position]
+            # Flip the bits at the selected positions (0→1, 1→0)
+            for pos in flip_positions:
+                flipped_y_bits[pos] = 1 - flipped_y_bits[pos]
             
             # Convert the new y_bits to a GF element
             new_y_gf = self._binary_to_gf(flipped_y_bits)
