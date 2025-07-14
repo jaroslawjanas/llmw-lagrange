@@ -4,6 +4,9 @@ cache/
 # Output directory
 output/
 
+# Console logs
+logs/
+
 # Scripts output directory
 scripts/output/
 
