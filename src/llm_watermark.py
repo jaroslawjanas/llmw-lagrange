@@ -395,7 +395,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         prompt: str, 
         max_new_tokens: int = 100, 
         verbose: bool = True
-    ) -> Tuple[str, Dict[str, int], List[int]]:
+    ) -> Tuple[str, str, List[int], str, Dict[str, int], List[int]]:
         """
         Generate text with Lagrange interpolation watermarking.
         
@@ -405,7 +405,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             verbose: Whether to show progress bar
             
         Returns:
-            Tuple of (generated_text, statistics, watermark_blocks_info)
+            Tuple of (full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info)
         """
 
         # Reset counters
@@ -600,7 +600,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             'green_ratio': self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
         }
 
-        return full_text, generated_text, formatted_prompt, statistics, watermark_blocks_info
+        return full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info
 
 
 class LLMWatermarkDecoder(LLMWatermarkerBase):
@@ -641,12 +641,13 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
         self.error_correction = error_correction
         
-    def decode_text(self, generated_text: str) -> List[Dict[str, Union[int, List[int]]]]:
+    def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> List[Dict[str, Union[int, List[int]]]]:
         """
-        Decode watermark information from generated text (without prompt).
+        Decode watermark information from generated text or pre-tokenized IDs.
         
         Args:
             generated_text: The generated text to decode (prompt already removed)
+            generated_ids: Pre-tokenized IDs to decode directly (bypasses tokenization)
             
         Returns:
             List of blocks, each containing:
@@ -654,9 +655,16 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
             - 'y': y-value as GF element converted to integer
         """
-        # Tokenize the generated-only text directly without any formatting
-        token_ids = self.tokenizer.encode(generated_text, add_special_tokens=False)
-        decoded_tokens_length = len(token_ids)
+        # Use pre-tokenized IDs if provided, otherwise tokenize the text
+        if generated_ids is not None:
+            token_ids = generated_ids
+            decoded_tokens_length = len(token_ids)
+        elif generated_text is not None:
+            # Tokenize the generated-only text directly without any formatting
+            token_ids = self.tokenizer.encode(generated_text, add_special_tokens=False)
+            decoded_tokens_length = len(token_ids)
+        else:
+            raise ValueError("Either generated_text or generated_ids must be provided")
 
         # Calculate number of complete blocks
         num_complete_blocks = len(token_ids) // self.n

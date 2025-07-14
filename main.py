@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
     parser.add_argument("--error-correction", action="store_true", help="Enable single-bit error correction by generating variants for each decoded block")
+    parser.add_argument("--skip-detokenization", action="store_true", help="Use generated token IDs directly for decoding instead of detokenizing and retokenizing text")
 
     args = parser.parse_args()
 
@@ -190,7 +191,7 @@ def main():
 
         # Time encoding
         encoding_start = time.time()
-        full_text, generated_text, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
+        full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
             prompt=prompt,
             max_new_tokens=args.max_tokens,
             verbose=args.verbose
@@ -237,7 +238,10 @@ def main():
         
         # Time decoding
         decoding_start = time.time()
-        decoded_blocks, decoded_tokens_length = decoder.decode_text(generated_text)
+        if args.skip_detokenization:
+            decoded_blocks, decoded_tokens_length = decoder.decode_text(generated_ids=generated_ids)
+        else:
+            decoded_blocks, decoded_tokens_length = decoder.decode_text(generated_text=generated_text)
         decoding_time = time.time() - decoding_start
         
         if args.verbose:
