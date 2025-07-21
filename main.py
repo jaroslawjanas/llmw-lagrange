@@ -259,12 +259,16 @@ def main():
         if args.verbose:
             print(f"Decoded {len(decoded_blocks)} blocks:")
             for i, block in enumerate(decoded_blocks):
-                print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}")
+                print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits'][0]):<{args.n * 3}}")
             
             # Compare encoder vs decoder results
             print(f"\nComparison (Watermark vs Encoded vs Decoded):")
-            print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark Matches'}")
-            print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))
+            if args.error_correction_k > 0:
+                print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark / Bit Correction'}")
+                print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 50))
+            else:
+                print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark'}")
+                print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))
             
             for i in range(min(len(watermark_blocks_info), len(decoded_blocks))):
                 enc_block = watermark_blocks_info[i]
@@ -274,12 +278,19 @@ def main():
                 x_match = "✓" if enc_block['x'] == dec_block['x'] else "✗"
                 
                 # Check if encoded bits match decoded bits (encoding/decoding consistency)
-                decoding_match = "✓" if enc_block['encoded_bits'] == dec_block['y_bits'] else "✗"
+                # Use only the original (first) decoded y_bits for comparison
+                decoding_match = "✓" if enc_block['encoded_bits'] == dec_block['y_bits'][0] else "✗"
                 
                 # Check if watermark bits match decoded bits (watermark recovery success)
-                watermark_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'] else "✗"
+                # Use only the original (first) decoded y_bits for comparison
+                watermark_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'][0] else "✗"
                 
-                print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits']):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<8} {watermark_match}")
+                if args.error_correction_k > 0:
+                    # Check if watermark bits match ANY variant in the decoded block (including original)
+                    bit_correction_match = "✓" if enc_block['y_bits'] in dec_block['y_bits'] else "✗"
+                    print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits'][0]):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match:<10} {bit_correction_match}")
+                else:
+                    print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits'][0]):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match}")
             
             # MCP Verification
             print(f"\n{'-'*60}")

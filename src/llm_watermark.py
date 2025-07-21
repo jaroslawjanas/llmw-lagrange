@@ -723,11 +723,11 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             # Convert y_bits back to GF element
             y_gf = self._binary_to_gf(y_bits)
             
-            # Store the extracted block information
+            # Store the extracted block information with lists for error correction variants
             blocks.append({
                 'x': int(x),
-                'y_bits': y_bits,
-                'y': int(y_gf)
+                'y_bits': [y_bits],  # List of y_bits variants (initially just original)
+                'y': [int(y_gf)]     # List of y values (initially just original)
             })
             progress_bar.update(1)
         
@@ -738,53 +738,46 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             if self.verbose:
                 print(f"Generating {self.error_correction_k}-bit error correction variants for {len(blocks)} blocks...")
             
-            # Start with original blocks
-            all_blocks = blocks.copy()
-            
             # Setup progress tracking for variant generation
             variant_progress_bar = tqdm(blocks, desc=f"Generating {self.error_correction_k}-bit Error Correction Variants")
             
-            # Generate variants for each original block
+            # Generate variants for each original block and append to the block's lists
             for block in variant_progress_bar:
-                variants = self.generate_k_bit_error_variants(block, self.error_correction_k)
-                all_blocks.extend(variants)
+                # Get the original y_bits (first element in the list)
+                original_y_bits = block['y_bits'][0]
+                
+                # Generate y bit variants
+                variant_y_bits_list = self.generate_k_bit_error_variants(original_y_bits, self.error_correction_k)
+                
+                # Append each variant's y_bits and corresponding y to the current block's lists
+                for variant_y_bits in variant_y_bits_list:
+                    # Convert the variant y_bits to a GF element
+                    variant_y_gf = self._binary_to_gf(variant_y_bits)
+                    block['y_bits'].append(variant_y_bits)
+                    block['y'].append(int(variant_y_gf))
             
             variant_progress_bar.close()
             
+            # Calculate total variants generated
+            total_variants = sum(len(block['y_bits']) - 1 for block in blocks)  # -1 to exclude original
             if self.verbose:
-                print(f"Generated {len(all_blocks)} total blocks ({len(blocks)} original + {len(all_blocks) - len(blocks)} variants)")
-            
-            return all_blocks, decoded_tokens_length
-        else:
-            return blocks, decoded_tokens_length
+                print(f"Generated {total_variants} total variants across {len(blocks)} blocks")
+        
+        return blocks, decoded_tokens_length
     
-    def generate_k_bit_error_variants(self, block: Dict[str, Union[int, List[int]]], k: int) -> List[Dict[str, Union[int, List[int]]]]:
+    def generate_k_bit_error_variants(self, y_bits: List[int], k: int) -> List[List[int]]:
         """
-        Generate all possible block variants where exactly k bits in y_bits are flipped.
+        Generate all possible variants where exactly k bits in y_bits are flipped.
         This is useful for error correction scenarios where we suspect k-bit errors.
         
         Args:
-            block: A single decoded block containing:
-                - 'x': x-coordinate (GF element as integer)
-                - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
-                - 'y': y-value as GF element converted to integer
+            y_bits: Binary sequence representing y-value [0,1,0,1,...]
             k: Number of bits to flip simultaneously (must be >= 1 and < n)
                 
         Returns:
-            List of variant blocks, each with exactly k bits flipped:
-            - 'x': Same x-coordinate as input
-            - 'y_bits': Binary sequence with k bits flipped
-            - 'y': New y-value as GF element matching the flipped y_bits
+            List of variant bit sequences, each with exactly k bits flipped
         """
         # Input validation
-        if not isinstance(block, dict):
-            raise ValueError("Block must be a dictionary")
-        
-        required_keys = {'x', 'y_bits', 'y'}
-        if not all(key in block for key in required_keys):
-            raise ValueError(f"Block must contain keys: {required_keys}")
-        
-        y_bits = block['y_bits']
         if not isinstance(y_bits, list):
             raise ValueError("y_bits must be a list")
         
@@ -811,17 +804,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             for pos in flip_positions:
                 flipped_y_bits[pos] = 1 - flipped_y_bits[pos]
             
-            # Convert the new y_bits to a GF element
-            new_y_gf = self._binary_to_gf(flipped_y_bits)
-            
-            # Create the variant block
-            variant = {
-                'x': block['x'],  # x-coordinate remains the same
-                'y_bits': flipped_y_bits,
-                'y': int(new_y_gf)
-            }
-            
-            variants.append(variant)
+            variants.append(flipped_y_bits)
         
         return variants
 
@@ -926,8 +909,21 @@ class MCPSolver:
                 'matching_blocks': 0
             }
         
-        # Extract (x, y) points as integers
-        points = [(block['x'], block['y']) for block in decoded_blocks]
+        # Calculate matching blocks if watermark_blocks provided
+        matching_blocks = 0
+        if watermark_blocks and decoded_blocks:
+            min_blocks = min(len(watermark_blocks), len(decoded_blocks))
+            for i in range(min_blocks):
+                # Check if watermark block matches ANY variant in the corresponding decoded block
+                if watermark_blocks[i]['y_bits'] in decoded_blocks[i]['y_bits']:
+                    matching_blocks += 1
+        
+        # Extract (x, y) points as integers - flatten all variants
+        points = []
+        for block in decoded_blocks:
+            x = block['x']  # Same x for all variants
+            for y in block['y']:  # All y variants
+                points.append((x, y))
         
         if self.verbose:
             print(f"Verifying watermark with {len(points)} points...")
@@ -962,14 +958,6 @@ class MCPSolver:
         
         # Check if recovered coefficients match original
         is_valid = (recovered_a0 == original_a0) and (recovered_a1 == original_a1)
-        
-        # Calculate matching blocks if watermark_blocks provided
-        matching_blocks = 0
-        if watermark_blocks and decoded_blocks:
-            min_blocks = min(len(watermark_blocks), len(decoded_blocks))
-            for i in range(min_blocks):
-                if watermark_blocks[i]['y_bits'] == decoded_blocks[i]['y_bits']:
-                    matching_blocks += 1
         
         return {
             'is_valid': is_valid,
