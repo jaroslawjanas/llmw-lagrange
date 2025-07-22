@@ -102,7 +102,7 @@ python main.py \
 - `--no-cuda`: Disable CUDA acceleration
 - `--verbose`: Show detailed output
 - `--stats`: Display statistics summary
-- `--skip-detokenization`: Use token IDs directly for decoding (recommended)
+- `--force-tokenization`: Force detokenization and retokenization for "full simulation" (use with caution)
 
 ## Architecture
 
@@ -171,12 +171,14 @@ Additional utility scripts in `scripts/` directory:
 
 ## Known Issues
 
-**Tokenization Inconsistency**: Using tokenization after generation and detokenization in decoding sometimes (approximately 1 in 20 cases) causes the encoding bits to not match the decoded ones for unknown reasons. This appears to be related to tokenizer inconsistencies when round-tripping through text.
+**Tokenization Inconsistency**: The `--force-tokenization` flag enables "full simulation" of the method as it would be used in a practical setting, where text is detokenized after generation and retokenized during decoding. However, in some cases (approximately 1 in 20) detokenization does not occur correctly for unknown reasons, causing encoding bits to not match decoded ones. The cause of these inconsistencies is unknown.
 
-**Recommendation**: Use the `--skip-detokenization` flag to bypass this issue by using generated token IDs directly for decoding instead of re-tokenizing the generated text.
+**Default Behavior**: By default, the system skips detokenization and uses generated token IDs directly for decoding, which avoids this issue and provides more reliable results.
+
+**Recommendation**: Use `--force-tokenization` with caution and only when you specifically need to simulate the full practical deployment scenario:
 
 ```bash
-python main.py --skip-detokenization --prompt "Your prompt here"
+python main.py --force-tokenization --prompt "Your prompt here"
 ```
 
 ## Performance Considerations
