@@ -413,6 +413,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         self.green_tokens_selected = 0
         self.red_tokens_selected = 0
         self.blocks_encoded = 0
+        self.properly_encoded_tokens = 0
 
         # Initialize tracking for watermark blocks
         watermark_blocks_info = []
@@ -548,12 +549,18 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                     
                     # Use tensor operations to efficiently check if the token is in the green list
                     is_green = (green_tokens == next_token_tensor).any().item()
+                    encoded_bit = 1 if is_green else 0
+                    
                     if is_green:
                         block_info["encoded_bits"].append(1)
                         self.green_tokens_selected += 1
                     else:
                         block_info["encoded_bits"].append(0)
                         self.red_tokens_selected += 1
+                    
+                    # Check if token was properly encoded (intended bit matches actual encoded bit)
+                    if current_bit == encoded_bit:
+                        self.properly_encoded_tokens += 1
 
                 # Add the new token to generated ids
                 all_ids.append(next_token_id)
@@ -598,7 +605,8 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             'red_tokens': self.red_tokens_selected,
             'blocks_encoded': self.blocks_encoded,
             'total_tokens_generated': tokens_generated,
-            'green_ratio': self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10)
+            'green_ratio': self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10),
+            'properly_encoded_tokens': self.properly_encoded_tokens
         }
 
         return full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info

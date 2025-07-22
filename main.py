@@ -161,7 +161,7 @@ def main():
     columns = [
         'field_size', 'prompt', 'generated_text', 'tokens_length', 
         'a0', 'a1', 'recovered_a0', 'recovered_a1', 'secret_key',
-        'watermark_blocks', 'decoded_blocks', 'matching_blocks', 
+        'watermark_blocks', 'decoded_blocks', 'matching_blocks', 'properly_encoded_tokens',
         'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
     ]
     
@@ -179,6 +179,7 @@ def main():
         'watermark_blocks': 'string',  # JSON string
         'decoded_blocks': 'string',    # JSON string
         'matching_blocks': 'int64',
+        'properly_encoded_tokens': 'int64',
         'watermark_recovered': 'boolean',
         'encoding_time': 'float64',
         'decoding_time': 'float64',
@@ -336,6 +337,7 @@ def main():
         stats_df.loc[prompt_idx, 'watermark_blocks'] = json.dumps(watermark_blocks_info)
         stats_df.loc[prompt_idx, 'decoded_blocks'] = json.dumps(decoded_blocks)
         stats_df.loc[prompt_idx, 'matching_blocks'] = verification_result['matching_blocks']
+        stats_df.loc[prompt_idx, 'properly_encoded_tokens'] = generation_statistics['properly_encoded_tokens']
         stats_df.loc[prompt_idx, 'watermark_recovered'] = verification_result['is_valid']
         stats_df.loc[prompt_idx, 'encoding_time'] = encoding_time
         stats_df.loc[prompt_idx, 'decoding_time'] = decoding_time
@@ -360,15 +362,21 @@ def main():
     print(f"  Parquet: {stats_parquet_file} ({os.path.getsize(stats_parquet_file):,} bytes)")
     
     if args.stats:
+        # Calculate total properly encoded tokens percentage across all prompts
+        total_properly_encoded = stats_df['properly_encoded_tokens'].sum()
+        total_tokens_generated = stats_df['tokens_length'].sum()
+        properly_encoded_percentage = (total_properly_encoded / total_tokens_generated) * 100 if total_tokens_generated > 0 else 0
+        
         print(f"\nStatistics Summary:")
         print(f"  Total prompts processed: {total_prompts}")
         print(f"  Successful watermark recoveries: {stats_df['watermark_recovered'].sum()}")
         print(f"  Watermark success rate: {stats_df['watermark_recovered'].mean():.2%}")
         print(f"  Average matching blocks: {stats_df['matching_blocks'].mean():.2f}")
+        print(f"  Total properly encoded tokens: {total_properly_encoded}/{total_tokens_generated} ({properly_encoded_percentage:.2f}%)")
         print(f"  Average timing:")
-        print(f"  Encoding: {stats_df['encoding_time'].mean():.3f}s")
-        print(f"  Decoding: {stats_df['decoding_time'].mean():.3f}s")
-        print(f"  MCP: {stats_df['mcp_time'].mean():.3f}s\n")
+        print(f"    Encoding: {stats_df['encoding_time'].mean():.3f}s")
+        print(f"    Decoding: {stats_df['decoding_time'].mean():.3f}s")
+        print(f"    MCP: {stats_df['mcp_time'].mean():.3f}s\n")
 
 
 if __name__ == "__main__":
