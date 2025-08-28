@@ -175,6 +175,53 @@ def analyze_token_experiments(min_tokens: int = 704):
         
         print(f"{row['model_name']:<35} {row['dataset_name']:<45} {row['n_value']:<3} {row['total_experiments']:<7} {row['positive_watermarks']:<6} {success_pct:<8} {blocks:<6} {enc_time:<8} {dec_time:<8} {mcp_time:<8}")
     
+    # Merged across datasets by model and n (weighted by number of filtered generations)
+    print(f"\n{'='*60}")
+    print(f"MERGED ACROSS DATASETS BY MODEL AND N (WEIGHTED)")
+    print(f"{'='*60}")
+
+    # Aggregate over filtered_df, which already enforces min_tokens
+    timing_cols = ['encoding_time', 'decoding_time', 'mcp_time']
+    agg_spec = {
+        'total_experiments': ('watermark_recovered', 'size'),
+        'positive_watermarks': ('watermark_recovered', 'sum'),
+        'success_rate': ('watermark_recovered', 'mean'),
+    }
+    if 'matching_blocks' in filtered_df.columns:
+        agg_spec['avg_matching_blocks'] = ('matching_blocks', 'mean')
+    # Add timing column means if present
+    for col in timing_cols:
+        if col in filtered_df.columns:
+            agg_spec[f'avg_{col}'] = (col, 'mean')
+
+    merged = (
+        filtered_df
+        .groupby(['model_name', 'n_value'])
+        .agg(**agg_spec)
+        .reset_index()
+        .sort_values(['model_name', 'n_value'])
+    )
+
+    # Header
+    print(f"{'Model':<35} {'N':<3} {f'>={min_tokens}-Exp':<7} {'Pos-WM':<6} {'Success':<8} {'Blocks':<6} {'Enc-Time':<8} {'Dec-Time':<8} {'MCP-Time':<8}")
+    print("-" * 120)
+
+    has_blocks = 'avg_matching_blocks' in merged.columns
+    has_enc = 'avg_encoding_time' in merged.columns
+    has_dec = 'avg_decoding_time' in merged.columns
+    has_mcp = 'avg_mcp_time' in merged.columns
+
+    for _, row in merged.iterrows():
+        total = int(row['total_experiments'])
+        pos = int(row['positive_watermarks'])
+        success_pct = f"{(pos / total):.1%}" if total > 0 else "N/A"
+        blocks = f"{row['avg_matching_blocks']:.1f}" if has_blocks else "N/A"
+        enc_time = f"{row['avg_encoding_time']:.2f}s" if has_enc else "N/A"
+        dec_time = f"{row['avg_decoding_time']:.3f}s" if has_dec else "N/A"
+        mcp_time = f"{row['avg_mcp_time']:.3f}s" if has_mcp else "N/A"
+
+        print(f"{row['model_name']:<35} {row['n_value']:<3} {total:<7} {pos:<6} {success_pct:<8} {blocks:<6} {enc_time:<8} {dec_time:<8} {mcp_time:<8}")
+
     # Calculate overall timing statistics
     print(f"\n{'='*60}")
     print(f"TIMING STATISTICS (>={min_tokens}-TOKEN EXPERIMENTS)")
