@@ -222,6 +222,51 @@ def analyze_token_experiments(min_tokens: int = 704):
 
         print(f"{row['model_name']:<35} {row['n_value']:<3} {total:<7} {pos:<6} {success_pct:<8} {blocks:<6} {enc_time:<8} {dec_time:<8} {mcp_time:<8}")
 
+    # Aggregated across models by n (weighted by number of filtered generations)
+    print(f"\n{'='*60}")
+    print(f"AGGREGATED ACROSS MODELS BY N (WEIGHTED)")
+    print(f"{'='*60}")
+    
+    timing_cols_models = ['encoding_time', 'decoding_time', 'mcp_time']
+    agg_spec_models = {
+        'total_experiments': ('watermark_recovered', 'size'),
+        'positive_watermarks': ('watermark_recovered', 'sum'),
+        'success_rate': ('watermark_recovered', 'mean'),
+    }
+    if 'matching_blocks' in filtered_df.columns:
+        agg_spec_models['avg_matching_blocks'] = ('matching_blocks', 'mean')
+    for col in timing_cols_models:
+        if col in filtered_df.columns:
+            agg_spec_models[f'avg_{col}'] = (col, 'mean')
+    
+    by_n = (
+        filtered_df
+        .groupby(['n_value'])
+        .agg(**agg_spec_models)
+        .reset_index()
+        .sort_values(['n_value'])
+    )
+    
+    # Header
+    print(f"{'N':<3} {f'>={min_tokens}-Exp':<7} {'Pos-WM':<6} {'Success':<8} {'Blocks':<6} {'Enc-Time':<8} {'Dec-Time':<8} {'MCP-Time':<8}")
+    print("-" * 90)
+    
+    has_blocks_n = 'avg_matching_blocks' in by_n.columns
+    has_enc_n = 'avg_encoding_time' in by_n.columns
+    has_dec_n = 'avg_decoding_time' in by_n.columns
+    has_mcp_n = 'avg_mcp_time' in by_n.columns
+    
+    for _, row in by_n.iterrows():
+        total = int(row['total_experiments'])
+        pos = int(row['positive_watermarks'])
+        success_pct = f"{(pos / total):.1%}" if total > 0 else "N/A"
+        blocks = f"{row['avg_matching_blocks']:.1f}" if has_blocks_n else "N/A"
+        enc_time = f"{row['avg_encoding_time']:.2f}s" if has_enc_n else "N/A"
+        dec_time = f"{row['avg_decoding_time']:.3f}s" if has_dec_n else "N/A"
+        mcp_time = f"{row['avg_mcp_time']:.3f}s" if has_mcp_n else "N/A"
+    
+        print(f"{row['n_value']:<3} {total:<7} {pos:<6} {success_pct:<8} {blocks:<6} {enc_time:<8} {dec_time:<8} {mcp_time:<8}")
+    
     # Calculate overall timing statistics
     print(f"\n{'='*60}")
     print(f"TIMING STATISTICS (>={min_tokens}-TOKEN EXPERIMENTS)")
