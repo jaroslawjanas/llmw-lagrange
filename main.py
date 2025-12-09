@@ -30,13 +30,26 @@ def main():
     parser.add_argument("--context-window", type=int, default=1500, help="Maximum number of tokens to use as context for generation (default: 1500)")
     parser.add_argument("--temperature", "--temp", type=float, default=0.0, help="Sampling temperature (default: 0.0 = greedy sampling, higher = more random)")
     parser.add_argument("--hash-window", type=int, default=1, help="Number of previous tokens to hash together (default: 1)") 
-    parser.add_argument("--n-prompts", type=int, default=1, help="Number of prompts to process (default: 1)")
+    parser.add_argument("--n-prompts", type=str, default="1", help="Number of prompts to process, or 'all' for entire dataset (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
     parser.add_argument("--error-correction-k", type=int, default=0, help="Enable k-bit error correction by generating variants for each decoded block (0=disabled, must be < n)")
     parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
 
     args = parser.parse_args()
+
+    # Parse n_prompts: accept "all" or a positive integer
+    if args.n_prompts.lower() == "all":
+        n_prompts = None
+    else:
+        try:
+            n_prompts = int(args.n_prompts)
+            if n_prompts < 1:
+                print(f"ERROR: --n-prompts must be a positive integer or 'all', got: {args.n_prompts}")
+                return 1
+        except ValueError:
+            print(f"ERROR: --n-prompts must be a positive integer or 'all', got: {args.n_prompts}")
+            return 1
 
     # Validate error correction parameter and show warning
     if args.error_correction_k >= args.n:
@@ -132,7 +145,7 @@ def main():
             dataset_split=dataset_split,
             dataset_column=dataset_column,
             seed=args.seed,
-            n_prompts=args.n_prompts
+            n_prompts=n_prompts
         )
         if args.verbose:
             print(f"\n--- Prompt from {dataset_name}/{dataset_subset} ({dataset_split} split, {dataset_column} column) ---")
