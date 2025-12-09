@@ -1,3 +1,5 @@
+# Note you can just comment out pytorch installation and install
+# whatever version and CUDA you need from https://pytorch.org/get-started/locally/
 name: llmw-lagrange
 channels:
   - pytorch
@@ -6,9 +8,10 @@ channels:
   - defaults
 dependencies:
   - python=3.10
+# -- Pytorch --
   - pytorch::pytorch=2.5.1
   - pytorch::pytorch-cuda=11.8 # 12.4
-  - transformers=4.51.3
+# -------------
   - datasets=3.6.0
   - tqdm=4.67.1
   - numpy>=2, <3
@@ -17,6 +20,7 @@ dependencies:
   - galois=0.4.6
   - pip
   - pip:
-    - accelerate==1.7.0
-    - huggingface_hub==0.33.0
+    - huggingface_hub==0.36.0
+    - accelerate==1.12.0
+    - transformers==4.57.3
     - protobuf==6.32.0
