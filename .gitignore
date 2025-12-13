@@ -22,12 +22,15 @@ hf_token
 
 # AI memory banks
 memory-bank/
+
+# Claude
+.claude/
 CLAUDE.MD
 CLAUDE.local.md
+$CLAUDE_ENV_FILE
 
-# AI configurations and rules
+# Other AI configurations
 .cline/
-.claude/
 .kilocode/
 
 # Experiment utomation files
