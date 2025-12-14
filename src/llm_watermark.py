@@ -13,7 +13,6 @@ import numpy as np
 import time
 from typing import List, Tuple, Dict, Optional, Union
 from abc import ABC, abstractmethod
-from itertools import combinations
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -657,7 +656,6 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         cache_dir: str = paths.CACHE_DIR,
         device: Optional[str] = "cpu",
         verbose: bool = False,
-        error_correction_k: int = 0,
         hamming_mode: str = "none",
     ):
         """
@@ -673,19 +671,10 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             cache_dir: Directory to cache models
             device: Device to run on ('cuda', 'cpu')
             verbose: Whether to show detailed output
-            error_correction_k: Number of bits to flip for error correction (0 = disabled, must be < n)
             hamming_mode: Hamming code mode ("none", "standard", "secded")
         """
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
-
-        # Validate error correction parameter
-        if error_correction_k < 0:
-            raise ValueError("error_correction_k must be non-negative")
-        if error_correction_k >= n:
-            raise ValueError(f"error_correction_k ({error_correction_k}) must be less than n ({n})")
-
-        self.error_correction_k = error_correction_k
 
         # Hamming code setup
         self.hamming_mode = hamming_mode
@@ -789,37 +778,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             progress_bar.update(1)
         
         progress_bar.close()
-        
-        # Generate error correction variants if enabled
-        if self.error_correction_k > 0:
-            if self.verbose:
-                print(f"Generating {self.error_correction_k}-bit error correction variants for {len(blocks)} blocks...")
-            
-            # Setup progress tracking for variant generation
-            variant_progress_bar = tqdm(blocks, desc=f"Generating {self.error_correction_k}-bit Error Correction Variants")
-            
-            # Generate variants for each original block and append to the block's lists
-            for block in variant_progress_bar:
-                # Get the original y_bits (first element in the list)
-                original_y_bits = block['y_bits'][0]
-                
-                # Generate y bit variants
-                variant_y_bits_list = self.generate_k_bit_error_variants(original_y_bits, self.error_correction_k)
-                
-                # Append each variant's y_bits and corresponding y to the current block's lists
-                for variant_y_bits in variant_y_bits_list:
-                    # Convert the variant y_bits to a GF element
-                    variant_y_gf = self._binary_to_gf(variant_y_bits)
-                    block['y_bits'].append(variant_y_bits)
-                    block['y'].append(int(variant_y_gf))
-            
-            variant_progress_bar.close()
-            
-            # Calculate total variants generated
-            total_variants = sum(len(block['y_bits']) - 1 for block in blocks)  # -1 to exclude original
-            if self.verbose:
-                print(f"Generated {total_variants} total variants across {len(blocks)} blocks")
-        
+
         return blocks, decoded_tokens_length
 
     def _decode_tokens_to_bits(self, token_ids: List[int]) -> List[int]:
@@ -908,49 +867,6 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             print(f"Found {valid_count} valid windows, {invalid_count} invalid windows")
 
         return candidates, decoded_tokens_length
-
-    def generate_k_bit_error_variants(self, y_bits: List[int], k: int) -> List[List[int]]:
-        """
-        Generate all possible variants where exactly k bits in y_bits are flipped.
-        This is useful for error correction scenarios where we suspect k-bit errors.
-        
-        Args:
-            y_bits: Binary sequence representing y-value [0,1,0,1,...]
-            k: Number of bits to flip simultaneously (must be >= 1 and < n)
-                
-        Returns:
-            List of variant bit sequences, each with exactly k bits flipped
-        """
-        # Input validation
-        if not isinstance(y_bits, list):
-            raise ValueError("y_bits must be a list")
-        
-        if len(y_bits) != self.n:
-            raise ValueError(f"y_bits must have exactly {self.n} bits, got {len(y_bits)}")
-        
-        if not all(bit in [0, 1] for bit in y_bits):
-            raise ValueError("y_bits must contain only 0s and 1s")
-        
-        if k < 1:
-            raise ValueError(f"k must be at least 1, got {k}")
-        
-        if k >= self.n:
-            raise ValueError(f"k ({k}) must be less than n ({self.n})")
-        
-        # Generate all possible combinations of k bit positions to flip
-        variants = []
-        
-        for flip_positions in combinations(range(self.n), k):
-            # Create a copy of the original y_bits
-            flipped_y_bits = y_bits.copy()
-            
-            # Flip the bits at the selected positions (0→1, 1→0)
-            for pos in flip_positions:
-                flipped_y_bits[pos] = 1 - flipped_y_bits[pos]
-            
-            variants.append(flipped_y_bits)
-        
-        return variants
 
 
 class MCPSolver:

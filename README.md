@@ -86,7 +86,6 @@ python main.py \
 ### Watermarking Parameters
 - `--green-fraction`: Fraction of vocabulary in green list (default: 0.5)
 - `--bias`: Logit bias for watermark tokens (default: 6.0)
-- `--error-correction-k`: Enable k-bit error correction (default: 0)
 
 ### Generation Parameters
 - `--temperature`: Sampling temperature (default: 0.0 for greedy)

@@ -33,7 +33,6 @@ def main():
     parser.add_argument("--n-prompts", type=str, default="1", help="Number of prompts to process, or 'all' for entire dataset (default: 1)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output and progress information")
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
-    parser.add_argument("--error-correction-k", type=int, default=0, help="Enable k-bit error correction by generating variants for each decoded block (0=disabled, must be < n)")
     parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
     parser.add_argument("--hamming", type=str, choices=["none", "standard", "secded"], default="none",
                         help="Hamming code mode: 'none' (default), 'standard' (correct 1-bit errors), 'secded' (correct 1-bit, detect 2-bit errors)")
@@ -52,18 +51,6 @@ def main():
         except ValueError:
             print(f"ERROR: --n-prompts must be a positive integer or 'all', got: {args.n_prompts}")
             return 1
-
-    # Validate error correction parameter and show warning
-    if args.error_correction_k >= args.n:
-        print(f"ERROR: error-correction-k ({args.error_correction_k}) must be less than n ({args.n})")
-        return 1
-    
-    if args.error_correction_k >= 3:
-        from math import comb
-        num_variants = comb(args.n, args.error_correction_k)
-        print(f"WARNING: Using {args.error_correction_k}-bit error correction will generate {num_variants:,} variants per block.")
-        print(f"         This may significantly increase memory usage and processing time.")
-        print(f"         Consider using smaller k values for large datasets.\n")
 
     # Set global cache
     paths.set_cache_dir(args.cache_dir)
@@ -267,7 +254,6 @@ def main():
             seed=args.seed,
             device=device,
             verbose=args.verbose,
-            error_correction_k=args.error_correction_k,
             hamming_mode=args.hamming
         )
         
@@ -286,34 +272,23 @@ def main():
             
             # Compare encoder vs decoder results
             print(f"\nComparison (Watermark vs Encoded vs Decoded):")
-            if args.error_correction_k > 0:
-                print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark / Bit Correction'}")
-                print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 50))
-            else:
-                print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark'}")
-                print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))
-            
+            print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark'}")
+            print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))
+
             for i in range(min(len(watermark_blocks_info), len(decoded_blocks))):
                 enc_block = watermark_blocks_info[i]
                 dec_block = decoded_blocks[i]
-                
+
                 # Check if X coordinates match
                 x_match = "Y" if enc_block['x'] == dec_block['x'] else "N"
-                
+
                 # Check if encoded bits match decoded bits (encoding/decoding consistency)
-                # Use only the original (first) decoded y_bits for comparison
                 decoding_match = "Y" if enc_block['encoded_bits'] == dec_block['y_bits'][0] else "N"
-                
+
                 # Check if watermark bits match decoded bits (watermark recovery success)
-                # Use only the original (first) decoded y_bits for comparison
                 watermark_match = "Y" if enc_block['y_bits'] == dec_block['y_bits'][0] else "N"
-                
-                if args.error_correction_k > 0:
-                    # Check if watermark bits match ANY variant in the decoded block (including original)
-                    bit_correction_match = "Y" if enc_block['y_bits'] in dec_block['y_bits'] else "N"
-                    print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits'][0]):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match:<10} {bit_correction_match}")
-                else:
-                    print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits'][0]):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match}")
+
+                print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits'][0]):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match}")
             
             # MCP Verification
             print(f"\n{'-'*60}")
@@ -331,19 +306,19 @@ def main():
         if args.verbose:
             print(f"Verification Results:")
             print(f"  Collinear Points: {verification_result['max_collinear_count']}/{verification_result['total_points']}")
-            print(f"  Original a₀: {a0}")
-            print(f"  Recovered a₀: {verification_result['recovered_a0']}")
-            print(f"  Original a₁: {a1}")
-            print(f"  Recovered a₁: {verification_result['recovered_a1']}")
+            print(f"  Original a0: {a0}")
+            print(f"  Recovered a0: {verification_result['recovered_a0']}")
+            print(f"  Original a1: {a1}")
+            print(f"  Recovered a1: {verification_result['recovered_a1']}")
             print(f"  Matching blocks: {verification_result['matching_blocks']}")
             
             if verification_result['is_valid']:
-                print(f"✅ Watermark successfully verified!")
+                print(f"Watermark successfully verified!")
             else:
-                print(f"❌ Watermark verification failed!")
+                print(f"Watermark verification failed!")
         else:
             # Compact output for non-verbose mode
-            status = "✅ VALID" if verification_result['is_valid'] else "❌ INVALID"
+            status = "VALID" if verification_result['is_valid'] else "INVALID"
             print(f"Watermark Verification: {status} (Collinear points: {verification_result['max_collinear_count']}/{verification_result['total_points']}, Matching: {verification_result['matching_blocks']})")
 
         # Collect statistics for this prompt run
