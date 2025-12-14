@@ -35,6 +35,8 @@ def main():
     parser.add_argument("--stats", action="store_true", help="Show statistics summary in console (statistics are always saved to file)")
     parser.add_argument("--error-correction-k", type=int, default=0, help="Enable k-bit error correction by generating variants for each decoded block (0=disabled, must be < n)")
     parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
+    parser.add_argument("--hamming", type=str, choices=["none", "standard", "secded"], default="none",
+                        help="Hamming code mode: 'none' (default), 'standard' (correct 1-bit errors), 'secded' (correct 1-bit, detect 2-bit errors)")
 
     args = parser.parse_args()
 
@@ -119,6 +121,7 @@ def main():
         context_window=args.context_window,
         temperature=args.temperature,
         hash_window=args.hash_window,
+        hamming_mode=args.hamming,
         verbose=args.verbose
     )
 
@@ -157,6 +160,11 @@ def main():
         print(f"Generating {args.max_tokens} tokens per prompt with watermarking...")
         print(f"Using dataset: {dataset_name}")
         print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
+        if args.hamming != "none":
+            print(f"Hamming mode: {args.hamming}")
+            print(f"  Data bits per block: {args.n}")
+            print(f"  Parity bits: {watermarker.hamming.parity_bit_count}")
+            print(f"  Tokens per block: {watermarker.tokens_per_block}")
 
     # Create dynamic output directory and file path
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -259,7 +267,8 @@ def main():
             seed=args.seed,
             device=device,
             verbose=args.verbose,
-            error_correction_k=args.error_correction_k
+            error_correction_k=args.error_correction_k,
+            hamming_mode=args.hamming
         )
         
         # Time decoding
@@ -289,19 +298,19 @@ def main():
                 dec_block = decoded_blocks[i]
                 
                 # Check if X coordinates match
-                x_match = "✓" if enc_block['x'] == dec_block['x'] else "✗"
+                x_match = "Y" if enc_block['x'] == dec_block['x'] else "N"
                 
                 # Check if encoded bits match decoded bits (encoding/decoding consistency)
                 # Use only the original (first) decoded y_bits for comparison
-                decoding_match = "✓" if enc_block['encoded_bits'] == dec_block['y_bits'][0] else "✗"
+                decoding_match = "Y" if enc_block['encoded_bits'] == dec_block['y_bits'][0] else "N"
                 
                 # Check if watermark bits match decoded bits (watermark recovery success)
                 # Use only the original (first) decoded y_bits for comparison
-                watermark_match = "✓" if enc_block['y_bits'] == dec_block['y_bits'][0] else "✗"
+                watermark_match = "Y" if enc_block['y_bits'] == dec_block['y_bits'][0] else "N"
                 
                 if args.error_correction_k > 0:
                     # Check if watermark bits match ANY variant in the decoded block (including original)
-                    bit_correction_match = "✓" if enc_block['y_bits'] in dec_block['y_bits'] else "✗"
+                    bit_correction_match = "Y" if enc_block['y_bits'] in dec_block['y_bits'] else "N"
                     print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits'][0]):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match:<10} {bit_correction_match}")
                 else:
                     print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits'][0]):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match}")

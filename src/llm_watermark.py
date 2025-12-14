@@ -24,6 +24,7 @@ from tqdm import tqdm
 from src.model_formatters import format_prompt_for_model
 from src.utils import load_hf_token
 from src.pm_galois import GaloisField, max_collinear_points, recover_line_equation
+from src.hamming import HammingCode
 import src.paths as paths
 
 
@@ -219,11 +220,12 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         context_window: int = 1500,
         temperature: float = 0.0,
         hash_window: int = 1,
+        hamming_mode: str = "none",
         verbose: bool = False
     ):
         """
         Initialize the watermarker with the specified model and parameters.
-        
+
         Args:
             model_name: HuggingFace model identifier
             secret_key: Secret key for watermarking
@@ -238,19 +240,34 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             context_window: Maximum number of tokens to use as context for generation (default: 1024)
             temperature: Sampling temperature (default: 0.0 = greedy sampling, higher = more random)
             hash_window: Number of previous tokens to hash together (default: 1)
+            hamming_mode: Hamming code mode ("none", "standard", "secded")
         """
         # Initialize base class
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
-        
+
         # Encoder-specific parameters
         self.line_fnc = line_fnc
         self.bias = bias
         self.context_window = context_window
         self.temperature = temperature
         self.hash_window = hash_window
-        
+
+        # Hamming code setup
+        self.hamming_mode = hamming_mode
+        if hamming_mode != "none":
+            self.hamming = HammingCode(n, secded=(hamming_mode == "secded"))
+        else:
+            self.hamming = None
+
         # Load model (tokenizer already loaded by base class)
         self._load_model()
+
+    @property
+    def tokens_per_block(self) -> int:
+        """Tokens per watermark block: n for standard, n + parity_bits for Hamming."""
+        if self.hamming:
+            return self.n + self.hamming.parity_bit_count
+        return self.n
         
     def _load_model(self):
         """Load the model."""
@@ -432,11 +449,15 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         cache_position = 0  # Track position in the cache
         
         # Calculate number of complete blocks we can generate
-        if max_new_tokens % self.n != 0:
-            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be divisible by n ({self.n}) to ensure complete blocks.")
-        num_blocks = max_new_tokens // self.n
+        if max_new_tokens % self.tokens_per_block != 0:
+            block_desc = f"{self.n} data" + (f" + {self.hamming.parity_bit_count} parity" if self.hamming else "")
+            raise ValueError(
+                f"max_new_tokens ({max_new_tokens}) must be divisible by "
+                f"tokens_per_block ({self.tokens_per_block} = {block_desc}) to ensure complete blocks."
+            )
+        num_blocks = max_new_tokens // self.tokens_per_block
         if num_blocks == 0:
-            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least n ({self.n}) to generate at least one block.")
+            raise ValueError(f"max_new_tokens ({max_new_tokens}) must be at least tokens_per_block ({self.tokens_per_block}) to generate at least one block.")
         
         # Setup progress tracking
         progress_bar = tqdm(range(max_new_tokens))
@@ -458,22 +479,29 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             
             # Compute y = f(x) using the line function
             y = self.line_fnc(x)
-            
+
             # Convert y to binary representation
             y_bits = self._gf_to_binary(y)
-            
+
+            # Apply Hamming encoding if enabled
+            if self.hamming:
+                block_bits = self.hamming.encode(y_bits)
+            else:
+                block_bits = y_bits
+
             # Track this block
             block_info = {
                 "block_idx": block_idx,
                 "x": int(x),
                 "y": int(y),
                 "y_bits": y_bits.copy(),
+                "hamming_bits": block_bits.copy() if self.hamming else None,
                 "encoded_bits": [],
                 "tokens": []
             }
-            
-            # Generate n tokens for this block (one for each bit of y)
-            for bit_idx in range(self.n):
+
+            # Generate tokens for this block (one for each bit)
+            for bit_idx in range(self.tokens_per_block):
                 # Prepare input for the model
                 if past_key_values is None:
                     # First generation - use the full prompt
@@ -506,8 +534,8 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                     past_key_values = outputs.past_key_values  # Update cache
                     cache_position += model_input_ids.shape[1]  # Update position
                 
-                # Determine bias type based on current bit
-                current_bit = y_bits[bit_idx]
+                # Determine bias type based on current bit (from block_bits which includes Hamming parity if enabled)
+                current_bit = block_bits[bit_idx]
                 bias_type = "green" if current_bit == 1 else "red"
                 
                 # For vocabulary splitting - use token_id = 0 for very first token, otherwise use previous generated token
@@ -568,7 +596,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 tokens_generated += 1
                 
                 # Update progress bar with stats
-                progress_bar.set_description(f"Encoding Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.n}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}")
+                progress_bar.set_description(f"Encoding Block {block_idx+1}/{num_blocks}, Bit {bit_idx+1}/{self.tokens_per_block}, Green: {self.green_tokens_selected}, Red: {self.red_tokens_selected}")
                 progress_bar.update(1)
                 
                 # Check if we've reached an EOS token
@@ -617,7 +645,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
     Decoder for extracting watermark information from LLM-generated text.
     Reverses the encoding process to extract x-coordinates and y-bit sequences.
     """
-    
+
     def __init__(
         self,
         model_name: str,
@@ -630,10 +658,11 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         device: Optional[str] = "cpu",
         verbose: bool = False,
         error_correction_k: int = 0,
+        hamming_mode: str = "none",
     ):
         """
         Initialize the decoder with the same parameters used for encoding.
-        
+
         Args:
             model_name: HuggingFace model identifier (same as used for encoding)
             secret_key: Secret key for watermarking (same as used for encoding)
@@ -645,28 +674,43 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             device: Device to run on ('cuda', 'cpu')
             verbose: Whether to show detailed output
             error_correction_k: Number of bits to flip for error correction (0 = disabled, must be < n)
+            hamming_mode: Hamming code mode ("none", "standard", "secded")
         """
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
-        
+
         # Validate error correction parameter
         if error_correction_k < 0:
             raise ValueError("error_correction_k must be non-negative")
         if error_correction_k >= n:
             raise ValueError(f"error_correction_k ({error_correction_k}) must be less than n ({n})")
-        
+
         self.error_correction_k = error_correction_k
+
+        # Hamming code setup
+        self.hamming_mode = hamming_mode
+        if hamming_mode != "none":
+            self.hamming = HammingCode(n, secded=(hamming_mode == "secded"))
+        else:
+            self.hamming = None
+
+    @property
+    def tokens_per_block(self) -> int:
+        """Tokens per watermark block: n for standard, n + parity_bits for Hamming."""
+        if self.hamming:
+            return self.n + self.hamming.parity_bit_count
+        return self.n
         
     def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> List[Dict[str, Union[int, List[int]]]]:
         """
         Decode watermark information from generated text or pre-tokenized IDs.
-        
+
         Args:
             generated_text: The generated text to decode (prompt already removed)
             generated_ids: Pre-tokenized IDs to decode directly (bypasses tokenization)
-            
+
         Returns:
-            List of blocks, each containing:
+            Tuple of (blocks, token_count) where blocks is a list, each containing:
             - 'x': x-coordinate (GF element as integer)
             - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
             - 'y': y-value as GF element converted to integer
@@ -682,9 +726,14 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         else:
             raise ValueError("Either generated_text or generated_ids must be provided")
 
+        # Dispatch to sliding window decoder if Hamming is enabled
+        if self.hamming:
+            return self._decode_text_sliding(token_ids)
+
+        # Standard fixed-boundary decoding (no Hamming)
         # Calculate number of complete blocks
         num_complete_blocks = len(token_ids) // self.n
-        
+
         if num_complete_blocks <= 1:
             return [], 0  # No complete blocks to decode
         
@@ -772,7 +821,94 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                 print(f"Generated {total_variants} total variants across {len(blocks)} blocks")
         
         return blocks, decoded_tokens_length
-    
+
+    def _decode_tokens_to_bits(self, token_ids: List[int]) -> List[int]:
+        """
+        Convert all tokens to bits based on green/red classification.
+
+        Args:
+            token_ids: List of token IDs to classify
+
+        Returns:
+            List of bits (1 for green, 0 for red)
+        """
+        all_bits = []
+        for i, token_id in enumerate(token_ids):
+            # Previous token for vocab split (0 for first token)
+            prev_token = 0 if i == 0 else token_ids[i - 1]
+            green_tokens, _ = self._get_red_green_tokens(prev_token)
+            is_green = (green_tokens == token_id).any().item()
+            all_bits.append(1 if is_green else 0)
+        return all_bits
+
+    def _decode_text_sliding(self, token_ids: List[int]) -> Tuple[List[Dict], int]:
+        """
+        Decode using sliding window with Hamming validity check.
+
+        Slides a window of size tokens_per_block over the bit stream,
+        checking each window for Hamming validity. Valid windows become
+        candidate (x, y) points for MCP verification.
+
+        Args:
+            token_ids: List of token IDs to decode
+
+        Returns:
+            Tuple of (candidates, token_count) where candidates is list of valid blocks
+        """
+        if not self.hamming:
+            raise ValueError("Sliding window decode requires Hamming mode")
+
+        decoded_tokens_length = len(token_ids)
+
+        # Step 1: Convert all tokens to bits
+        if self.verbose:
+            print(f"Converting {len(token_ids)} tokens to bits...")
+        all_bits = self._decode_tokens_to_bits(token_ids)
+
+        # Step 2: Slide window and collect valid candidates
+        window_size = self.tokens_per_block
+        candidates = []
+        valid_count = 0
+        invalid_count = 0
+
+        if self.verbose:
+            print(f"Sliding window of size {window_size} over {len(all_bits)} bits...")
+
+        num_windows = len(all_bits) - window_size + 1
+        progress_bar = tqdm(range(num_windows), desc="Sliding Window Decode")
+
+        for start in progress_bar:
+            window_bits = all_bits[start:start + window_size]
+
+            # Decode and check validity using Hamming
+            data_bits, syndrome, is_valid = self.hamming.decode(window_bits)
+
+            if is_valid:
+                valid_count += 1
+                # Compute x from token before this window
+                prev_token = 0 if start == 0 else token_ids[start - 1]
+                x = self._hash_to_gf_element(prev_token, self.secret_key)
+                y_gf = self._binary_to_gf(data_bits)
+
+                candidates.append({
+                    'x': int(x),
+                    'y_bits': [data_bits],
+                    'y': [int(y_gf)],
+                    'window_start': start,
+                    'syndrome': syndrome
+                })
+            else:
+                invalid_count += 1
+
+            progress_bar.set_description(f"Sliding Window: {valid_count} valid, {invalid_count} invalid")
+
+        progress_bar.close()
+
+        if self.verbose:
+            print(f"Found {valid_count} valid windows, {invalid_count} invalid windows")
+
+        return candidates, decoded_tokens_length
+
     def generate_k_bit_error_variants(self, y_bits: List[int], k: int) -> List[List[int]]:
         """
         Generate all possible variants where exactly k bits in y_bits are flipped.
