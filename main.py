@@ -172,6 +172,7 @@ def main():
         'field_size', 'prompt', 'generated_text', 'generated_ids', 'tokens_length',
         'a0', 'a1', 'recovered_a0', 'recovered_a1', 'secret_key',
         'watermark_blocks', 'decoded_blocks', 'valid_blocks', 'matching_blocks',
+        'unique_watermark_blocks', 'unique_matching_blocks',
         'properly_encoded_tokens', 'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
     ]
 
@@ -191,6 +192,8 @@ def main():
         'decoded_blocks': 'string',    # JSON string (all blocks)
         'valid_blocks': 'string',      # JSON string (valid blocks only)
         'matching_blocks': 'string',   # JSON string (blocks matching watermark)
+        'unique_watermark_blocks': 'int64',
+        'unique_matching_blocks': 'int64',
         'properly_encoded_tokens': 'int64',
         'watermark_recovered': 'boolean',
         'encoding_time': 'float64',
@@ -380,6 +383,8 @@ def main():
         stats_df.loc[prompt_idx, 'decoded_blocks'] = json.dumps(all_blocks)
         stats_df.loc[prompt_idx, 'valid_blocks'] = json.dumps(valid_blocks)
         stats_df.loc[prompt_idx, 'matching_blocks'] = json.dumps(verification_result['matching_blocks'])
+        stats_df.loc[prompt_idx, 'unique_watermark_blocks'] = len(set((b['x'], b['y']) for b in watermark_blocks_info))
+        stats_df.loc[prompt_idx, 'unique_matching_blocks'] = len(set((b['x'], b['y']) for b in verification_result['matching_blocks']))
         stats_df.loc[prompt_idx, 'properly_encoded_tokens'] = generation_statistics['properly_encoded_tokens']
         stats_df.loc[prompt_idx, 'watermark_recovered'] = verification_result['is_valid']
         stats_df.loc[prompt_idx, 'encoding_time'] = encoding_time
