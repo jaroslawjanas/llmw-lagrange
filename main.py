@@ -36,6 +36,8 @@ def main():
     parser.add_argument("--force-tokenization", action="store_true", help="Force detokenization and retokenization of text for decoding instead of using token IDs directly")
     parser.add_argument("--hamming", type=str, choices=["none", "standard", "secded"], default="none",
                         help="Hamming code mode: 'none' (default), 'standard' (correct 1-bit errors), 'secded' (correct 1-bit, detect 2-bit errors)")
+    parser.add_argument("--correct", action="store_true", default=False,
+                        help="Enable Hamming error correction (default: detection-only for better filtering)")
 
     args = parser.parse_args()
 
@@ -235,7 +237,9 @@ def main():
             print(f"  Greeen ratio: {generation_statistics['green_ratio']}")
             print(f"  Blocks encoded: {generation_statistics['blocks_encoded']}")
 
-            print(f"\nWatermark blocks info:")
+            # Count unique (x, y) pairs
+            unique_pairs = len(set((b['x'], b['y']) for b in watermark_blocks_info))
+            print(f"\nWatermark blocks info ({unique_pairs}/{len(watermark_blocks_info)} unique):")
             # Calculate the maximum width needed for x and y values based on n
             max_gf_value_str_len = len(str(2**args.n - 1))
             for i, block in enumerate(watermark_blocks_info):
@@ -256,7 +260,8 @@ def main():
             seed=args.seed,
             device=device,
             verbose=args.verbose,
-            hamming_mode=args.hamming
+            hamming_mode=args.hamming,
+            correct=args.correct
         )
         
         # Time decoding
@@ -268,12 +273,47 @@ def main():
         decoding_time = time.time() - decoding_start
         
         if args.verbose:
-            print(f"Decoded {len(all_blocks)} total blocks, {len(valid_blocks)} valid blocks:")
-            for i, block in enumerate(valid_blocks):
-                print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}, c_bits= {block['c_bits']}")
+            if args.hamming != "none":
+                # Hamming mode: Show sliding window stats and recovery table
+                correction_mode = "on" if args.correct else "off"
+                print(f"Sliding window: {len(all_blocks)} scanned, {len(valid_blocks)} valid, {len(all_blocks) - len(valid_blocks)} invalid (correction={correction_mode})")
 
-            # Compare encoder vs decoder results (only for non-Hamming fixed-boundary mode)
-            if args.hamming == "none":
+                print(f"\nWatermark Recovery:")
+                print(f"  {'#':>3}  {'Encoded (x, y)':<17}  {'Decoded (x, y)':<17}  Status")
+                print(f"  {'--':>3}  {'-'*17}  {'-'*17}  {'-'*10}")
+
+                recovered = 0
+                recovered_pairs = set()  # Track unique (x, y) pairs recovered
+                decoded_y_map = {b['y']: b for b in valid_blocks}
+
+                for i, wm in enumerate(watermark_blocks_info, 1):
+                    wm_coord = f"({wm['x']}, {wm['y']})"
+                    if wm['y'] in decoded_y_map:
+                        dec = decoded_y_map[wm['y']]
+                        dec_coord = f"({dec['x']}, {dec['y']})"
+                        recovered_pairs.add((dec['x'], dec['y']))
+                        if dec['x'] == wm['x']:
+                            status = "RECOVERED"
+                        else:
+                            status = "RECOVERED*"  # y matched but at wrong x position
+                        recovered += 1
+                    else:
+                        dec_coord = "-"
+                        status = "MISSING"
+                    print(f"  {i:>3}  {wm_coord:<17}  {dec_coord:<17}  {status}")
+
+                noise = len(valid_blocks) - recovered
+                recovery_pct = 100 * recovered / len(watermark_blocks_info) if watermark_blocks_info else 0
+                unique_recovered = len(recovered_pairs)
+                print(f"\n  Recovery: {recovered}/{len(watermark_blocks_info)} ({recovery_pct:.1f}%), {unique_recovered} unique")
+                print(f"  Noise: {noise} extra valid blocks")
+            else:
+                # Non-Hamming mode: Original output
+                print(f"Decoded {len(all_blocks)} total blocks, {len(valid_blocks)} valid blocks:")
+                for i, block in enumerate(valid_blocks):
+                    print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}, c_bits= {block['c_bits']}")
+
+                # Compare encoder vs decoder results (only for non-Hamming fixed-boundary mode)
                 print(f"\nComparison (Watermark vs Encoded vs Decoded):")
                 print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark'}")
                 print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))

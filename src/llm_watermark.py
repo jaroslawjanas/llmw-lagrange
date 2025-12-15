@@ -657,6 +657,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         device: Optional[str] = "cpu",
         verbose: bool = False,
         hamming_mode: str = "none",
+        correct: bool = False,
     ):
         """
         Initialize the decoder with the same parameters used for encoding.
@@ -672,12 +673,14 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             device: Device to run on ('cuda', 'cpu')
             verbose: Whether to show detailed output
             hamming_mode: Hamming code mode ("none", "standard", "secded")
+            correct: Whether to enable Hamming error correction (False = detection-only)
         """
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
 
         # Hamming code setup
         self.hamming_mode = hamming_mode
+        self.correct = correct
         if hamming_mode != "none":
             self.hamming = HammingCode(n, secded=(hamming_mode == "secded"))
         else:
@@ -851,7 +854,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                 c_bits.append(window_bits[-1])  # Overall parity is last bit
 
             # Decode and check validity using Hamming
-            data_bits, syndrome, is_valid = self.hamming.decode(window_bits)
+            data_bits, syndrome, is_valid = self.hamming.decode(window_bits, correct=self.correct)
 
             # Compute x from token before this window
             prev_token = 0 if start == 0 else token_ids[start - 1]

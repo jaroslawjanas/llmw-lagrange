@@ -15,7 +15,7 @@ This project implements the watermarking technique described in academic researc
 - **Multi-bit Watermarking**: Embeds n-bit blocks using Lagrange interpolation over Galois fields
 - **Configurable Parameters**: Adjustable field size, bias strength, and generation settings
 - **Model Agnostic**: Works with any HuggingFace transformer model
-- **Error Correction**: k-bit error correction variants for robust watermark recovery
+- **Hamming Code Support**: Optional error detection/correction with standard Hamming or SECDED modes
 - **Statistical Analysis**: Comprehensive tracking and analysis of watermarking effectiveness
 - **Flexible Input**: Supports custom prompts or dataset-driven generation
 
@@ -95,6 +95,10 @@ python main.py \
 ### Dataset Parameters
 - `--dataset`: HuggingFace dataset specification (4 arguments: name, subset, split, column)
 - `--n-prompts`: Number of prompts to process (default: 1)
+
+### Hamming Code Parameters
+- `--hamming`: Hamming code mode: "none" (default), "standard", or "secded"
+- `--correct`: Enable error correction (default: detection-only for better filtering)
 
 ### System Parameters
 - `--cache-dir`: Cache directory for models/datasets
@@ -185,7 +189,7 @@ python main.py --force-tokenization --prompt "Your prompt here"
 - **Memory Usage**: Large models and long generations require significant memory
 - **GPU Acceleration**: CUDA support recommended for faster inference
 - **Context Window**: Automatic K/V cache trimming prevents memory overflow
-- **Error Correction**: Higher k values exponentially increase computation time
+- **Hamming Modes**: SECDED provides better error detection than standard Hamming with minimal overhead
 
 ## Contributing
 

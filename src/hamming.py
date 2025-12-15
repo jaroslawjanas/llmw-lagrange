@@ -111,18 +111,20 @@ class HammingCode:
 
         return codeword
 
-    def decode(self, codeword: List[int]) -> Tuple[List[int], int, bool]:
+    def decode(self, codeword: List[int], correct: bool = False) -> Tuple[List[int], int, bool]:
         """
         Decode codeword, detect/correct errors.
 
         Args:
             codeword: List of (n+r) or (n+r+1) bits
+            correct: If True, attempt error correction. If False, detection-only mode
+                     (better filtering with lower false positive rate).
 
         Returns:
             Tuple of (corrected_data, syndrome, is_valid):
-            - corrected_data: n data bits (potentially corrected)
+            - corrected_data: n data bits (potentially corrected if correct=True)
             - syndrome: error position (0 = no error detected by parity checks)
-            - is_valid: True if no error or correctable single-bit error
+            - is_valid: True if no error detected (or corrected if correct=True)
         """
         expected_len = self.codeword_length
         if len(codeword) != expected_len:
@@ -155,18 +157,25 @@ class HammingCode:
             if syndrome == 0 and overall_parity == 0:
                 pass  # No error
             elif syndrome == 0 and overall_parity == 1:
-                pass  # Error in overall parity bit only, data unaffected
+                # Error in overall parity bit only
+                if not correct:
+                    is_valid = False  # Strict detection: any parity error = invalid
             elif syndrome > 0 and overall_parity == 1:
-                # Single-bit error, correct it
-                if syndrome <= len(bits):
-                    bits[syndrome - 1] ^= 1
+                # Single-bit error
+                if correct and syndrome <= len(bits):
+                    bits[syndrome - 1] ^= 1  # Correct it
+                else:
+                    is_valid = False  # Detection-only: mark invalid
             else:  # syndrome > 0 and overall_parity == 0
                 # Double-bit error detected
                 is_valid = False
         else:
-            # Standard Hamming: correct single-bit errors
-            if syndrome > 0 and syndrome <= len(bits):
-                bits[syndrome - 1] ^= 1
+            # Standard Hamming
+            if syndrome > 0:
+                if correct and syndrome <= len(bits):
+                    bits[syndrome - 1] ^= 1  # Correct it
+                else:
+                    is_valid = False  # Detection-only: mark invalid
 
         # Extract data bits from corrected codeword
         data = [bits[pos - 1] for pos in self.data_positions]
