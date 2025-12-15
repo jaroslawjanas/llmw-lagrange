@@ -167,26 +167,28 @@ def main():
     
     # Initialize DataFrame with all required columns
     columns = [
-        'field_size', 'prompt', 'generated_text', 'tokens_length', 
+        'field_size', 'prompt', 'generated_text', 'generated_ids', 'tokens_length',
         'a0', 'a1', 'recovered_a0', 'recovered_a1', 'secret_key',
-        'watermark_blocks', 'decoded_blocks', 'matching_blocks', 'properly_encoded_tokens',
-        'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
+        'watermark_blocks', 'decoded_blocks', 'valid_blocks', 'matching_blocks',
+        'properly_encoded_tokens', 'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
     ]
-    
+
     # Define explicit column types for proper data handling
     column_dtypes = {
         'field_size': 'int64',
         'prompt': 'string',
-        'generated_text': 'string', 
+        'generated_text': 'string',
+        'generated_ids': 'string',     # JSON string
         'tokens_length': 'int64',
         'a0': 'int64',
         'a1': 'int64',
-        'recovered_a0': 'Int64',  # Nullable integer for None values
-        'recovered_a1': 'Int64',  # Nullable integer for None values
+        'recovered_a0': 'Int64',       # Nullable integer for None values
+        'recovered_a1': 'Int64',       # Nullable integer for None values
         'secret_key': 'string',
         'watermark_blocks': 'string',  # JSON string
-        'decoded_blocks': 'string',    # JSON string
-        'matching_blocks': 'int64',
+        'decoded_blocks': 'string',    # JSON string (all blocks)
+        'valid_blocks': 'string',      # JSON string (valid blocks only)
+        'matching_blocks': 'string',   # JSON string (blocks matching watermark)
         'properly_encoded_tokens': 'int64',
         'watermark_recovered': 'boolean',
         'encoding_time': 'float64',
@@ -260,35 +262,36 @@ def main():
         # Time decoding
         decoding_start = time.time()
         if args.force_tokenization:
-            decoded_blocks, decoded_tokens_length = decoder.decode_text(generated_text=generated_text)
+            all_blocks, valid_blocks, decoded_tokens_length = decoder.decode_text(generated_text=generated_text)
         else:
-            decoded_blocks, decoded_tokens_length = decoder.decode_text(generated_ids=generated_ids)
+            all_blocks, valid_blocks, decoded_tokens_length = decoder.decode_text(generated_ids=generated_ids)
         decoding_time = time.time() - decoding_start
         
         if args.verbose:
-            print(f"Decoded {len(decoded_blocks)} blocks:")
-            for i, block in enumerate(decoded_blocks):
-                print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits'][0]):<{args.n * 3}}")
-            
-            # Compare encoder vs decoder results
-            print(f"\nComparison (Watermark vs Encoded vs Decoded):")
-            print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark'}")
-            print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))
+            print(f"Decoded {len(all_blocks)} total blocks, {len(valid_blocks)} valid blocks:")
+            for i, block in enumerate(valid_blocks):
+                print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}, c_bits= {block['c_bits']}")
 
-            for i in range(min(len(watermark_blocks_info), len(decoded_blocks))):
-                enc_block = watermark_blocks_info[i]
-                dec_block = decoded_blocks[i]
+            # Compare encoder vs decoder results (only for non-Hamming fixed-boundary mode)
+            if args.hamming == "none":
+                print(f"\nComparison (Watermark vs Encoded vs Decoded):")
+                print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark'}")
+                print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))
 
-                # Check if X coordinates match
-                x_match = "Y" if enc_block['x'] == dec_block['x'] else "N"
+                for i in range(min(len(watermark_blocks_info), len(valid_blocks))):
+                    enc_block = watermark_blocks_info[i]
+                    dec_block = valid_blocks[i]
 
-                # Check if encoded bits match decoded bits (encoding/decoding consistency)
-                decoding_match = "Y" if enc_block['encoded_bits'] == dec_block['y_bits'][0] else "N"
+                    # Check if X coordinates match
+                    x_match = "Y" if enc_block['x'] == dec_block['x'] else "N"
 
-                # Check if watermark bits match decoded bits (watermark recovery success)
-                watermark_match = "Y" if enc_block['y_bits'] == dec_block['y_bits'][0] else "N"
+                    # Check if encoded bits match decoded bits (encoding/decoding consistency)
+                    decoding_match = "Y" if enc_block['encoded_bits'] == dec_block['y_bits'] else "N"
 
-                print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits'][0]):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match}")
+                    # Check if watermark bits match decoded bits (watermark recovery success)
+                    watermark_match = "Y" if enc_block['y_bits'] == dec_block['y_bits'] else "N"
+
+                    print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits']):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match}")
             
             # MCP Verification
             print(f"\n{'-'*60}")
@@ -297,10 +300,10 @@ def main():
         
         # Create MCP solver
         mcp_solver = MCPSolver(gf=gf, n=args.n, verbose=args.verbose)
-        
-        # Time MCP verification
+
+        # Time MCP verification (use valid_blocks for verification)
         mcp_start = time.time()
-        verification_result = mcp_solver.verify_watermark(decoded_blocks, a0, a1, watermark_blocks_info)
+        verification_result = mcp_solver.verify_watermark(valid_blocks, a0, a1, watermark_blocks_info)
         mcp_time = time.time() - mcp_start
         
         if args.verbose:
@@ -310,7 +313,7 @@ def main():
             print(f"  Recovered a0: {verification_result['recovered_a0']}")
             print(f"  Original a1: {a1}")
             print(f"  Recovered a1: {verification_result['recovered_a1']}")
-            print(f"  Matching blocks: {verification_result['matching_blocks']}")
+            print(f"  Matching blocks: {len(verification_result['matching_blocks'])}")
             
             if verification_result['is_valid']:
                 print(f"Watermark successfully verified!")
@@ -319,12 +322,14 @@ def main():
         else:
             # Compact output for non-verbose mode
             status = "VALID" if verification_result['is_valid'] else "INVALID"
-            print(f"Watermark Verification: {status} (Collinear points: {verification_result['max_collinear_count']}/{verification_result['total_points']}, Matching: {verification_result['matching_blocks']})")
+            matching_count = len(verification_result['matching_blocks'])
+            print(f"Watermark Verification: {status} (Collinear points: {verification_result['max_collinear_count']}/{verification_result['total_points']}, Matching: {matching_count})")
 
         # Collect statistics for this prompt run
         stats_df.loc[prompt_idx, 'field_size'] = 2 ** args.n
         stats_df.loc[prompt_idx, 'prompt'] = prompt
         stats_df.loc[prompt_idx, 'generated_text'] = generated_text
+        stats_df.loc[prompt_idx, 'generated_ids'] = json.dumps(generated_ids)
         stats_df.loc[prompt_idx, 'tokens_length'] = decoded_tokens_length
         stats_df.loc[prompt_idx, 'a0'] = int(a0)
         stats_df.loc[prompt_idx, 'a1'] = int(a1)
@@ -332,8 +337,9 @@ def main():
         stats_df.loc[prompt_idx, 'recovered_a1'] = int(verification_result['recovered_a1']) if verification_result['recovered_a1'] is not None else None
         stats_df.loc[prompt_idx, 'secret_key'] = secret_key
         stats_df.loc[prompt_idx, 'watermark_blocks'] = json.dumps(watermark_blocks_info)
-        stats_df.loc[prompt_idx, 'decoded_blocks'] = json.dumps(decoded_blocks)
-        stats_df.loc[prompt_idx, 'matching_blocks'] = verification_result['matching_blocks']
+        stats_df.loc[prompt_idx, 'decoded_blocks'] = json.dumps(all_blocks)
+        stats_df.loc[prompt_idx, 'valid_blocks'] = json.dumps(valid_blocks)
+        stats_df.loc[prompt_idx, 'matching_blocks'] = json.dumps(verification_result['matching_blocks'])
         stats_df.loc[prompt_idx, 'properly_encoded_tokens'] = generation_statistics['properly_encoded_tokens']
         stats_df.loc[prompt_idx, 'watermark_recovered'] = verification_result['is_valid']
         stats_df.loc[prompt_idx, 'encoding_time'] = encoding_time
@@ -363,12 +369,16 @@ def main():
         total_properly_encoded = stats_df['properly_encoded_tokens'].sum()
         total_tokens_generated = stats_df['tokens_length'].sum()
         properly_encoded_percentage = (total_properly_encoded / total_tokens_generated) * 100 if total_tokens_generated > 0 else 0
-        
+
+        # Calculate average matching blocks from JSON
+        matching_counts = stats_df['matching_blocks'].apply(lambda x: len(json.loads(x)) if x else 0)
+        avg_matching_blocks = matching_counts.mean()
+
         print(f"\nStatistics Summary:")
         print(f"  Total prompts processed: {total_prompts}")
         print(f"  Successful watermark recoveries: {stats_df['watermark_recovered'].sum()}")
         print(f"  Watermark success rate: {stats_df['watermark_recovered'].mean():.2%}")
-        print(f"  Average matching blocks: {stats_df['matching_blocks'].mean():.2f}")
+        print(f"  Average matching blocks: {avg_matching_blocks:.2f}")
         print(f"  Total properly encoded tokens: {total_properly_encoded}/{total_tokens_generated} ({properly_encoded_percentage:.2f}%)")
         print(f"  Average timing:")
         print(f"    Encoding: {stats_df['encoding_time'].mean():.3f}s")

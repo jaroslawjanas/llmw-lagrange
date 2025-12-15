@@ -690,7 +690,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             return self.n + self.hamming.parity_bit_count
         return self.n
         
-    def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> List[Dict[str, Union[int, List[int]]]]:
+    def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> Tuple[List[Dict], List[Dict], int]:
         """
         Decode watermark information from generated text or pre-tokenized IDs.
 
@@ -699,10 +699,11 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             generated_ids: Pre-tokenized IDs to decode directly (bypasses tokenization)
 
         Returns:
-            Tuple of (blocks, token_count) where blocks is a list, each containing:
+            Tuple of (all_blocks, valid_blocks, token_count) where each block contains:
             - 'x': x-coordinate (GF element as integer)
-            - 'y_bits': Binary sequence representing y-value [0,1,0,1,...]
             - 'y': y-value as GF element converted to integer
+            - 'y_bits': Data bits (flat list)
+            - 'c_bits': Parity bits (empty list for non-Hamming)
         """
         # Use pre-tokenized IDs if provided, otherwise tokenize the text
         if generated_ids is not None:
@@ -724,19 +725,19 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         num_complete_blocks = len(token_ids) // self.n
 
         if num_complete_blocks <= 1:
-            return [], 0  # No complete blocks to decode
-        
+            return [], [], 0  # No complete blocks to decode
+
         blocks = []
-        
+
         # Setup progress tracking for decoder
         progress_bar = tqdm(range(num_complete_blocks), desc="Decoding Blocks")
-        
+
         # Process each complete block
         for block_idx in range(num_complete_blocks):
             start_idx = block_idx * self.n
             end_idx = start_idx + self.n
             block_tokens = token_ids[start_idx:end_idx]
-            
+
             # Determine previous token for x-coordinate calculation
             if block_idx == 0:
                 # First block uses token ID 0 (same as encoder)
@@ -744,10 +745,10 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             else:
                 # Use last token of previous block
                 previous_token = token_ids[start_idx - 1]
-            
+
             # Calculate x-coordinate using the same method as encoder
             x = self._hash_to_gf_element(previous_token, self.secret_key)
-            
+
             # Extract y_bits by classifying each token as green (1) or red (0)
             y_bits = []
             for i, token_id in enumerate(block_tokens):
@@ -758,28 +759,30 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                 else:
                     # Use the previous token in the sequence
                     vocab_split_token = token_ids[start_idx + i - 1]
-                
+
                 # Get green and red token lists for this position
                 green_tokens, red_tokens = self._get_red_green_tokens(vocab_split_token)
-                
+
                 # Check if current token is in green list (1) or red list (0)
                 is_green = (green_tokens == token_id).any().item()
                 y_bits.append(1 if is_green else 0)
-            
+
             # Convert y_bits back to GF element
             y_gf = self._binary_to_gf(y_bits)
-            
-            # Store the extracted block information with lists for error correction variants
+
+            # Store block with flat structure (no Hamming, so c_bits is empty)
             blocks.append({
                 'x': int(x),
-                'y_bits': [y_bits],  # List of y_bits variants (initially just original)
-                'y': [int(y_gf)]     # List of y values (initially just original)
+                'y': int(y_gf),
+                'y_bits': y_bits,
+                'c_bits': []
             })
             progress_bar.update(1)
-        
+
         progress_bar.close()
 
-        return blocks, decoded_tokens_length
+        # For non-Hamming, all blocks are considered valid
+        return blocks, blocks, decoded_tokens_length
 
     def _decode_tokens_to_bits(self, token_ids: List[int]) -> List[int]:
         """
@@ -800,19 +803,21 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             all_bits.append(1 if is_green else 0)
         return all_bits
 
-    def _decode_text_sliding(self, token_ids: List[int]) -> Tuple[List[Dict], int]:
+    def _decode_text_sliding(self, token_ids: List[int]) -> Tuple[List[Dict], List[Dict], int]:
         """
         Decode using sliding window with Hamming validity check.
 
         Slides a window of size tokens_per_block over the bit stream,
-        checking each window for Hamming validity. Valid windows become
-        candidate (x, y) points for MCP verification.
+        checking each window for Hamming validity. Returns all blocks and
+        valid blocks separately.
 
         Args:
             token_ids: List of token IDs to decode
 
         Returns:
-            Tuple of (candidates, token_count) where candidates is list of valid blocks
+            Tuple of (all_blocks, valid_blocks, token_count)
+            - all_blocks: Every sliding window result
+            - valid_blocks: Only Hamming-valid windows
         """
         if not self.hamming:
             raise ValueError("Sliding window decode requires Hamming mode")
@@ -824,9 +829,10 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             print(f"Converting {len(token_ids)} tokens to bits...")
         all_bits = self._decode_tokens_to_bits(token_ids)
 
-        # Step 2: Slide window and collect valid candidates
+        # Step 2: Slide window and collect all blocks
         window_size = self.tokens_per_block
-        candidates = []
+        all_blocks = []
+        valid_blocks = []
         valid_count = 0
         invalid_count = 0
 
@@ -839,23 +845,31 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         for start in progress_bar:
             window_bits = all_bits[start:start + window_size]
 
+            # Extract parity bits from window (at positions 1,2,4,8,... which are 0,1,3,7,... in 0-indexed)
+            c_bits = [window_bits[pos - 1] for pos in self.hamming.parity_positions]
+            if self.hamming.secded:
+                c_bits.append(window_bits[-1])  # Overall parity is last bit
+
             # Decode and check validity using Hamming
             data_bits, syndrome, is_valid = self.hamming.decode(window_bits)
 
+            # Compute x from token before this window
+            prev_token = 0 if start == 0 else token_ids[start - 1]
+            x = self._hash_to_gf_element(prev_token, self.secret_key)
+            y_gf = self._binary_to_gf(data_bits)
+
+            block = {
+                'x': int(x),
+                'y': int(y_gf),
+                'y_bits': data_bits,
+                'c_bits': c_bits
+            }
+
+            all_blocks.append(block)
+
             if is_valid:
                 valid_count += 1
-                # Compute x from token before this window
-                prev_token = 0 if start == 0 else token_ids[start - 1]
-                x = self._hash_to_gf_element(prev_token, self.secret_key)
-                y_gf = self._binary_to_gf(data_bits)
-
-                candidates.append({
-                    'x': int(x),
-                    'y_bits': [data_bits],
-                    'y': [int(y_gf)],
-                    'window_start': start,
-                    'syndrome': syndrome
-                })
+                valid_blocks.append(block)
             else:
                 invalid_count += 1
 
@@ -866,7 +880,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         if self.verbose:
             print(f"Found {valid_count} valid windows, {invalid_count} invalid windows")
 
-        return candidates, decoded_tokens_length
+        return all_blocks, valid_blocks, decoded_tokens_length
 
 
 class MCPSolver:
@@ -943,21 +957,21 @@ class MCPSolver:
     def verify_watermark(self, decoded_blocks: List[Dict], original_a0: object, original_a1: object, watermark_blocks: List[Dict] = None) -> Dict:
         """
         Complete watermark verification pipeline.
-        
+
         Args:
-            decoded_blocks: List of decoded blocks from LLMWatermarkDecoder
-            original_a0: Original a₀ coefficient (GF element)
-            original_a1: Original a₁ coefficient (GF element)
-            watermark_blocks: Optional list of original watermark blocks for matching count
-            
+            decoded_blocks: List of decoded blocks (typically valid_blocks from decoder)
+            original_a0: Original a0 coefficient (GF element)
+            original_a1: Original a1 coefficient (GF element)
+            watermark_blocks: Optional list of original watermark blocks for matching
+
         Returns:
             Dictionary containing:
             - 'is_valid': Boolean indicating if watermark is valid
-            - 'recovered_a0': Recovered a₀ coefficient
-            - 'recovered_a1': Recovered a₁ coefficient
+            - 'recovered_a0': Recovered a0 coefficient
+            - 'recovered_a1': Recovered a1 coefficient
             - 'max_collinear_count': Number of points on the best line
             - 'total_points': Total number of points analyzed
-            - 'matching_blocks': Number of blocks that match between watermark and decoded
+            - 'matching_blocks': List of decoded blocks whose y matches any watermark y
         """
         if not decoded_blocks:
             return {
@@ -966,31 +980,28 @@ class MCPSolver:
                 'recovered_a1': None,
                 'max_collinear_count': 0,
                 'total_points': 0,
-                'matching_blocks': 0
+                'matching_blocks': []
             }
-        
-        # Calculate matching blocks if watermark_blocks provided
-        matching_blocks = 0
+
+        # Find matching blocks: decoded blocks whose y matches any watermark block's y
+        matching_blocks = []
         if watermark_blocks and decoded_blocks:
-            min_blocks = min(len(watermark_blocks), len(decoded_blocks))
-            for i in range(min_blocks):
-                # Check if watermark block matches ANY variant in the corresponding decoded block
-                if watermark_blocks[i]['y_bits'] in decoded_blocks[i]['y_bits']:
-                    matching_blocks += 1
-        
-        # Extract (x, y) points as integers - flatten all variants
+            watermark_y_values = {wb['y'] for wb in watermark_blocks}
+            for block in decoded_blocks:
+                if block['y'] in watermark_y_values:
+                    matching_blocks.append(block)
+
+        # Extract (x, y) points - y is now a single int, not a list
         points = []
         for block in decoded_blocks:
-            x = block['x']  # Same x for all variants
-            for y in block['y']:  # All y variants
-                points.append((x, y))
-        
+            points.append((block['x'], block['y']))
+
         if self.verbose:
             print(f"Verifying watermark with {len(points)} points...")
-        
+
         # Solve MCP problem
         max_count, best_slope, collinear_points = self.solve_mcp(points)
-        
+
         if max_count < 2:
             return {
                 'is_valid': False,
@@ -998,9 +1009,9 @@ class MCPSolver:
                 'recovered_a1': None,
                 'max_collinear_count': max_count,
                 'total_points': len(points),
-                'matching_blocks': 0
+                'matching_blocks': []
             }
-        
+
         # Recover line equation
         try:
             recovered_a0, recovered_a1 = self.recover_line_equation(collinear_points)
@@ -1013,12 +1024,12 @@ class MCPSolver:
                 'recovered_a1': None,
                 'max_collinear_count': max_count,
                 'total_points': len(points),
-                'matching_blocks': 0
+                'matching_blocks': []
             }
-        
+
         # Check if recovered coefficients match original
         is_valid = (recovered_a0 == original_a0) and (recovered_a1 == original_a1)
-        
+
         return {
             'is_valid': is_valid,
             'recovered_a0': recovered_a0,
