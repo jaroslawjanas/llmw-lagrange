@@ -163,7 +163,30 @@ def main():
     output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_{timestamp}"
     output_dir = os.path.join("output", output_subdir)
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    # Save run configuration
+    run_config = {
+        'model': args.model,
+        'max_tokens': args.max_tokens,
+        'green_fraction': args.green_fraction,
+        'bias': args.bias,
+        'n': args.n,
+        'seed': args.seed,
+        'dataset': args.dataset,
+        'context_window': args.context_window,
+        'temperature': args.temperature,
+        'hash_window': args.hash_window,
+        'n_prompts': args.n_prompts,
+        'force_tokenization': args.force_tokenization,
+        'hamming': args.hamming,
+        'correct': args.correct,
+        'timestamp': timestamp,
+        'output_dir': output_subdir
+    }
+    config_file = os.path.join(output_dir, "run_config.json")
+    with open(config_file, 'w') as f:
+        json.dump(run_config, f, indent=2)
+
     stats_file = os.path.join(output_dir, "statistics.csv")
     stats_parquet_file = os.path.join(output_dir, "statistics.parquet")
     
