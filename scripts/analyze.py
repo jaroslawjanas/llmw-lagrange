@@ -189,7 +189,7 @@ def create_box_plots(df, output_path, model_name):
     plt.close(fig)
 
 
-def format_stats_report(stats, model_name, row_counts, min_tokens_info):
+def format_stats_report(stats, model_name, row_counts, min_tokens_info, source_dirs=None):
     """Format statistics as text report."""
     lines = []
     w = 80  # width
@@ -200,6 +200,15 @@ def format_stats_report(stats, model_name, row_counts, min_tokens_info):
     lines.append(f'Model: {model_name}')
     lines.append(f'Min tokens: {min_tokens_info}')
     lines.append('')
+
+    # List source directories if multiple experiments were merged
+    if source_dirs and len(source_dirs) > 0:
+        lines.append('-' * w)
+        lines.append(f'SOURCE EXPERIMENTS ({len(source_dirs)})')
+        lines.append('-' * w)
+        for src in sorted(source_dirs):
+            lines.append(f'  {src}')
+        lines.append('')
 
     lines.append('-' * w)
     lines.append('ROW COUNTS')
@@ -340,6 +349,9 @@ def main():
         stats = calculate_stats(model_df)
         row_counts = {'total': total_rows, 'included': included_rows}
 
+        # Collect unique source directories
+        source_dirs = model_df['_source'].unique().tolist()
+
         # Determine min_tokens info string
         if args.min_tokens is not None:
             min_tokens_info = str(args.min_tokens)
@@ -347,7 +359,7 @@ def main():
             min_tokens_info = "per-experiment max_tokens"
 
         # Generate report
-        report = format_stats_report(stats, model, row_counts, min_tokens_info)
+        report = format_stats_report(stats, model, row_counts, min_tokens_info, source_dirs)
 
         # Save outputs
         model_clean = model.replace('/', '_')
