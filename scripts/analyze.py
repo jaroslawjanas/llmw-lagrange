@@ -9,11 +9,7 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
-from lib import ExperimentLoader
-
-# Parameters that should be consistent within a model group
-CRITICAL_PARAMS = ['n', 'hamming', 'max_tokens', 'bias', 'temperature',
-                   'hash_window', 'correct', 'green_fraction']
+from lib import load_and_prepare_experiments
 
 
 def parse_args():
@@ -34,55 +30,6 @@ Examples:
     parser.add_argument("--force", action="store_true",
                         help="Proceed even with conflicting parameters")
     return parser.parse_args()
-
-
-def check_conflicts(experiments_by_model):
-    """
-    Check for conflicting parameters within each model group.
-
-    Returns:
-        dict: {model: {param: set(values)}} for parameters with multiple values
-    """
-    conflicts = {}
-
-    for model, experiments in experiments_by_model.items():
-        model_conflicts = {}
-
-        for param in CRITICAL_PARAMS:
-            values = set()
-            for exp in experiments:
-                if exp.config and param in exp.config:
-                    value = exp.config[param]
-                    # Convert lists to tuples for hashability
-                    if isinstance(value, list):
-                        value = tuple(value)
-                    values.add(value)
-
-            if len(values) > 1:
-                model_conflicts[param] = values
-
-        if model_conflicts:
-            conflicts[model] = model_conflicts
-
-    return conflicts
-
-
-def apply_min_tokens_filter(df, min_tokens):
-    """
-    Apply row-level filtering based on tokens_length.
-
-    Args:
-        df: DataFrame with tokens_length and _max_tokens columns
-        min_tokens: Global threshold (if specified) or None to use per-row _max_tokens
-
-    Returns:
-        Filtered DataFrame
-    """
-    if min_tokens is not None:
-        return df[df['tokens_length'] >= min_tokens].copy()
-    else:
-        # Use per-experiment max_tokens as threshold
-        return df[df['tokens_length'] >= df['_max_tokens']].copy()
 
 
 def calculate_stats(df):
@@ -272,41 +219,12 @@ def format_stats_report(stats, model_name, row_counts, min_tokens_info, source_d
 def main():
     args = parse_args()
 
-    # Load ALL experiments
-    loader = ExperimentLoader()
-    experiments = loader.load_all()
-
-    if not experiments:
-        print("No experiments found.")
-        return 1
-
-    print(f"Loaded {len(experiments)} experiment(s)")
-
-    # Group by model (structure for future --group-by support)
-    experiments_by_model = {}
-    for exp in experiments:
-        model = exp.config.get('model', 'unknown') if exp.config else 'unknown'
-        if model not in experiments_by_model:
-            experiments_by_model[model] = []
-        experiments_by_model[model].append(exp)
-
-    print(f"Found {len(experiments_by_model)} model(s): {list(experiments_by_model.keys())}")
-
-    # Check for conflicts
-    conflicts = check_conflicts(experiments_by_model)
-    if conflicts and not args.force:
-        print("\nERROR: Conflicting experiment parameters detected.\n")
-        for model, params in conflicts.items():
-            print(f"Model '{model}':")
-            for param, values in params.items():
-                # Sort values for consistent output
-                sorted_values = sorted(str(v) for v in values)
-                print(f"  - {param}: {sorted_values}")
-            print()
-        print("Use --force to proceed anyway (results may not be meaningful).")
-        return 1
-    elif conflicts:
-        print("\nWARNING: Conflicting parameters detected, proceeding with --force.\n")
+    # Load and prepare experiments using unified loader
+    prepared_data = load_and_prepare_experiments(
+        min_tokens=args.min_tokens,
+        force=args.force,
+        verbose=True
+    )
 
     # Create output directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -314,43 +232,17 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Process each model group
-    for model, model_experiments in experiments_by_model.items():
+    for model, model_data in prepared_data.items():
         print(f"\nProcessing model: {model}")
 
-        # Merge DataFrames, adding config fields
-        dfs = []
-        for exp in model_experiments:
-            exp_df = exp.data.copy()
-            exp_df['_max_tokens'] = exp.config.get('max_tokens', 0) if exp.config else 0
-            exp_df['_source'] = exp.source_dir
-            dfs.append(exp_df)
-
-        model_df = pd.concat(dfs, ignore_index=True)
-        total_rows = len(model_df)
-
-        # Apply min-tokens filter
-        model_df = apply_min_tokens_filter(model_df, args.min_tokens)
-        included_rows = len(model_df)
-
-        if included_rows == 0:
-            print(f"  WARNING: All {total_rows} rows filtered out by min-tokens. Skipping.")
-            continue
-
-        print(f"  Rows: {included_rows}/{total_rows} (excluded {total_rows - included_rows})")
-
-        # Calculate unique_valid_blocks if missing (legacy support)
-        if 'unique_valid_blocks' not in model_df.columns:
-            print("  Note: Computing unique_valid_blocks from JSON (legacy data)")
-            model_df['unique_valid_blocks'] = model_df['valid_blocks'].apply(
-                lambda x: len(set((b['x'], b['y']) for b in json.loads(x))) if x else 0
-            )
+        model_df = model_data['df']
+        source_dirs = model_data['sources']
+        total_rows = model_data['total_rows']
+        included_rows = model_data['included_rows']
 
         # Calculate stats
         stats = calculate_stats(model_df)
         row_counts = {'total': total_rows, 'included': included_rows}
-
-        # Collect unique source directories
-        source_dirs = model_df['_source'].unique().tolist()
 
         # Determine min_tokens info string
         if args.min_tokens is not None:
