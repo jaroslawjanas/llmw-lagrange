@@ -733,7 +733,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         blocks = []
 
         # Setup progress tracking for decoder
-        progress_bar = tqdm(range(num_complete_blocks), desc="Decoding Blocks")
+        progress_bar = tqdm(range(num_complete_blocks), desc="Decoding Blocks", disable=not self.verbose)
 
         # Process each complete block
         for block_idx in range(num_complete_blocks):
@@ -843,7 +843,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             print(f"Sliding window of size {window_size} over {len(all_bits)} bits...")
 
         num_windows = len(all_bits) - window_size + 1
-        progress_bar = tqdm(range(num_windows), desc="Sliding Window Decode")
+        progress_bar = tqdm(range(num_windows), desc="Sliding Window Decode", disable=not self.verbose)
 
         for start in progress_bar:
             window_bits = all_bits[start:start + window_size]
@@ -924,12 +924,9 @@ class MCPSolver:
         """
         if len(points) < 2:
             return 0, None, []
-        
-        # Create a GaloisField instance for this field size
-        galois_field = GaloisField(self.n)
-        
+
         # Use the new framework's max_collinear_points function
-        max_count, best_slope, collinear_points = max_collinear_points(points, galois_field)
+        max_count, best_slope, collinear_points = max_collinear_points(points, self.gf)
         
         if self.verbose:
             print(f"Found maximum {max_count} collinear points with slope {best_slope}")
@@ -948,12 +945,9 @@ class MCPSolver:
         """
         if len(collinear_points) < 2:
             raise ValueError("Need at least 2 points to determine a line")
-        
-        # Create a GaloisField instance for this field size
-        galois_field = GaloisField(self.n)
-        
+
         # Use the new framework's recover_line_equation function
-        a0, a1 = recover_line_equation(collinear_points, galois_field)
+        a0, a1 = recover_line_equation(collinear_points, self.gf)
         
         return a0, a1
     
