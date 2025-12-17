@@ -13,6 +13,7 @@ import numpy as np
 import time
 from typing import List, Tuple, Dict, Optional, Union
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -25,6 +26,35 @@ from src.utils import load_hf_token
 from src.pm_galois import GaloisField, max_collinear_points, recover_line_equation
 from src.hamming import HammingCode
 import src.paths as paths
+
+
+@lru_cache(maxsize=1000)
+def _compute_vocab_split(
+    token_id: int, secret_key: str, vocab_size: int, green_list_fraction: float, device: str
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Cached vocab split computation.
+
+    Args:
+        token_id: Previous token ID to hash
+        secret_key: Secret key for watermarking
+        vocab_size: Size of vocabulary
+        green_list_fraction: Fraction of tokens in green list
+        device: Device for torch operations
+
+    Returns:
+        Tuple of (green_tokens, red_tokens) as tensors
+    """
+    hash_input = f"{token_id}-{secret_key}"
+    hash_seed = int(hashlib.sha256(hash_input.encode()).hexdigest(), 16) % (2**32)
+
+    rng = torch.Generator(device=device)
+    rng.manual_seed(hash_seed)
+
+    perm = torch.randperm(vocab_size, generator=rng, requires_grad=False, device=device)
+    split = int(vocab_size * green_list_fraction)
+
+    return perm[:split], perm[split:]
 
 
 class LLMWatermarkerBase(ABC):
@@ -165,42 +195,17 @@ class LLMWatermarkerBase(ABC):
         """
         Generate red and green token lists based on the hash of a token and secret key.
         This creates a deterministic division of the vocabulary into "green" and "red" tokens.
-        
+        Uses LRU cache (maxsize=1000) to avoid recomputing for repeated token_ids.
+
         Args:
             token_id: Single token ID to hash
-            secret_key: Secret key for watermarking
-            
+
         Returns:
             Tuple of (green_tokens, red_tokens) as tensors
         """
-        # Create a hash from the token ID and secret key
-        hash_input = f"{token_id}-{self.secret_key}"
-        hash_object = hashlib.sha256(hash_input.encode())
-        hash_hex = hash_object.hexdigest()
-        
-        # Convert the hexadecimal hash to a 32-bit integer for use as a random seed
-        # This ensures deterministic outcomes for the same input token and secret key
-        hash_seed = int(hash_hex, 16) % (2**32)
-        
-        # Create a generator and set its seed
-        rng_generator = torch.Generator(device=self.device)
-        rng_generator.manual_seed(hash_seed)
-        
-        # Use torch.randperm for efficient permutation generation
-        permutation = torch.randperm(
-            self.vocab_size,
-            generator=rng_generator,
-            requires_grad=False,
-            device=self.device
+        return _compute_vocab_split(
+            token_id, self.secret_key, self.vocab_size, self.green_list_fraction, self.device
         )
-        
-        # Split the permuted indices into "green" and "red" lists
-        split_point = int(self.vocab_size * self.green_list_fraction)
-
-        green_tokens = permutation[:split_point]
-        red_tokens = permutation[split_point:]
-        
-        return green_tokens, red_tokens
 
 
 class LLMWatermarkEncoder(LLMWatermarkerBase):
