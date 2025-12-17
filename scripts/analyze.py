@@ -5,6 +5,7 @@ Loads all experiment results, groups by model, and generates statistics and box 
 """
 import argparse
 import json
+import shutil
 from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -230,6 +231,16 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.output_dir) / f"run_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy run configs from source experiments
+    configs_dir = output_dir / 'source_configs'
+    configs_dir.mkdir(exist_ok=True)
+    for model_data in prepared_data.values():
+        for source_dir in model_data['sources']:
+            config_src = Path('output') / source_dir / 'run_config.json'
+            if config_src.exists():
+                config_dst = configs_dir / f'{source_dir}.json'
+                shutil.copy(config_src, config_dst)
 
     # Process each model group
     for model, model_data in prepared_data.items():
