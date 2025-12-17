@@ -708,84 +708,19 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             - 'y_bits': Data bits (flat list)
             - 'c_bits': Parity bits (empty list for non-Hamming)
         """
-        # Use pre-tokenized IDs if provided, otherwise tokenize the text
+        # Get token IDs from text or use provided IDs
         if generated_ids is not None:
             token_ids = generated_ids
-            decoded_tokens_length = len(token_ids)
         elif generated_text is not None:
-            # Tokenize the generated-only text directly without any formatting
             token_ids = self.tokenizer.encode(generated_text, add_special_tokens=False)
-            decoded_tokens_length = len(token_ids)
         else:
             raise ValueError("Either generated_text or generated_ids must be provided")
 
-        # Dispatch to sliding window decoder if Hamming is enabled
+        # Dispatch to appropriate decoder
         if self.hamming:
-            return self._decode_text_sliding(token_ids)
-
-        # Standard fixed-boundary decoding (no Hamming)
-        # Calculate number of complete blocks
-        num_complete_blocks = len(token_ids) // self.n
-
-        if num_complete_blocks <= 1:
-            return [], [], 0  # No complete blocks to decode
-
-        blocks = []
-
-        # Setup progress tracking for decoder
-        progress_bar = tqdm(range(num_complete_blocks), desc="Decoding Blocks", disable=not self.verbose)
-
-        # Process each complete block
-        for block_idx in range(num_complete_blocks):
-            start_idx = block_idx * self.n
-            end_idx = start_idx + self.n
-            block_tokens = token_ids[start_idx:end_idx]
-
-            # Determine previous token for x-coordinate calculation
-            if block_idx == 0:
-                # First block uses token ID 0 (same as encoder)
-                previous_token = 0
-            else:
-                # Use last token of previous block
-                previous_token = token_ids[start_idx - 1]
-
-            # Calculate x-coordinate using the same method as encoder
-            x = self._hash_to_gf_element(previous_token, self.secret_key)
-
-            # Extract y_bits by classifying each token as green (1) or red (0)
-            y_bits = []
-            for i, token_id in enumerate(block_tokens):
-                # Determine the previous token for vocabulary splitting
-                if start_idx + i == 0:
-                    # Very first token in the sequence
-                    vocab_split_token = 0
-                else:
-                    # Use the previous token in the sequence
-                    vocab_split_token = token_ids[start_idx + i - 1]
-
-                # Get green and red token lists for this position
-                green_tokens, red_tokens = self._get_red_green_tokens(vocab_split_token)
-
-                # Check if current token is in green list (1) or red list (0)
-                is_green = (green_tokens == token_id).any().item()
-                y_bits.append(1 if is_green else 0)
-
-            # Convert y_bits back to GF element
-            y_gf = self._binary_to_gf(y_bits)
-
-            # Store block with flat structure (no Hamming, so c_bits is empty)
-            blocks.append({
-                'x': int(x),
-                'y': int(y_gf),
-                'y_bits': y_bits,
-                'c_bits': []
-            })
-            progress_bar.update(1)
-
-        progress_bar.close()
-
-        # For non-Hamming, all blocks are considered valid
-        return blocks, blocks, decoded_tokens_length
+            return self._decode_sliding_blocks(token_ids)
+        else:
+            return self._decode_fixed_blocks(token_ids)
 
     def _decode_tokens_to_bits(self, token_ids: List[int]) -> List[int]:
         """
@@ -806,7 +741,55 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             all_bits.append(1 if is_green else 0)
         return all_bits
 
-    def _decode_text_sliding(self, token_ids: List[int]) -> Tuple[List[Dict], List[Dict], int]:
+    def _decode_fixed_blocks(self, token_ids: List[int]) -> Tuple[List[Dict], List[Dict], int]:
+        """
+        Decode using fixed-boundary blocks (non-Hamming mode).
+
+        Args:
+            token_ids: List of token IDs to decode
+
+        Returns:
+            Tuple of (all_blocks, valid_blocks, token_count)
+            For non-Hamming, all_blocks and valid_blocks are the same list.
+        """
+        num_blocks = len(token_ids) // self.n
+
+        if num_blocks <= 1:
+            return [], [], 0
+
+        blocks = []
+        progress_bar = tqdm(range(num_blocks), desc="Decoding Blocks", disable=not self.verbose)
+
+        for block_idx in range(num_blocks):
+            block_start = block_idx * self.n
+
+            # X-coordinate from token before this block (0 for first block)
+            prev_token = 0 if block_start == 0 else token_ids[block_start - 1]
+            x = self._hash_to_gf_element(prev_token, self.secret_key)
+
+            # Classify each token in block as green (1) or red (0)
+            y_bits = []
+            for i in range(self.n):
+                pos = block_start + i
+                token_id = token_ids[pos]
+                vocab_split_token = 0 if pos == 0 else token_ids[pos - 1]
+                green_tokens, _ = self._get_red_green_tokens(vocab_split_token)
+                is_green = (green_tokens == token_id).any().item()
+                y_bits.append(1 if is_green else 0)
+
+            y_gf = self._binary_to_gf(y_bits)
+            blocks.append({
+                'x': int(x),
+                'y': int(y_gf),
+                'y_bits': y_bits,
+                'c_bits': []
+            })
+            progress_bar.update(1)
+
+        progress_bar.close()
+        return blocks, blocks, len(token_ids)
+
+    def _decode_sliding_blocks(self, token_ids: List[int]) -> Tuple[List[Dict], List[Dict], int]:
         """
         Decode using sliding window with Hamming validity check.
 
