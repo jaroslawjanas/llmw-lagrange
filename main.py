@@ -11,6 +11,7 @@ from datetime import datetime
 import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder, MCPSolver
+from src.pm_galois import GaloisField
 from tqdm import tqdm
 
 
@@ -366,7 +367,10 @@ def main():
             print(f"{'-'*60}")
         
         # Create MCP solver
-        mcp_solver = MCPSolver(gf=gf, n=args.n, verbose=args.verbose)
+        # Note: MCPSolver uses pm_galois.GaloisField (has subtract/divide methods),
+        # not galois.GF which is used by encoder/decoder for field arithmetic
+        pm_gf = GaloisField(args.n)
+        mcp_solver = MCPSolver(gf=pm_gf, n=args.n, verbose=args.verbose)
 
         # Time MCP verification (use valid_blocks for verification)
         mcp_start = time.time()
