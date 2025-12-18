@@ -73,10 +73,10 @@ class LLMWatermarkerBase(ABC):
         secret_key: str,
         n: int,
         gf: object,
+        device: str,
         green_list_fraction: float = 0.5,
         seed: int = 4242,
         cache_dir: str = paths.CACHE_DIR,
-        device: Optional[str] = "cpu",
         verbose: bool = False,
     ):
         """
@@ -220,11 +220,11 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         line_fnc: callable,
         n: int,
         gf: object,
+        device: str,
         green_list_fraction: float = 0.5,
         bias: float = 6.0,
         seed: int = 42,
         cache_dir: str = paths.CACHE_DIR,
-        device: Optional[str] = "cpu",
         context_window: int = 1500,
         temperature: float = 0.0,
         hash_window: int = 1,
@@ -244,14 +244,14 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             bias: Logit bias to apply to green tokens (default: 6.0)
             seed: Random seed for reproducibility
             cache_dir: Directory to cache models
-            device: Device to run model on ('cuda', 'cpu', or None for auto-detection)
+            device: Device to run model on ('cuda', 'cpu')
             context_window: Maximum number of tokens to use as context for generation (default: 1024)
             temperature: Sampling temperature (default: 0.0 = greedy sampling, higher = more random)
             hash_window: Number of previous tokens to hash together (default: 1)
             hamming_mode: Hamming code mode ("none", "standard", "secded")
         """
         # Initialize base class
-        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
+        super().__init__(model_name, secret_key, n, gf, device, green_list_fraction, seed, cache_dir, verbose)
 
         # Encoder-specific parameters
         self.line_fnc = line_fnc
@@ -660,10 +660,10 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         secret_key: str,
         n: int,
         gf: object,
+        device: str,
         green_list_fraction: float = 0.5,
         seed: int = 4242,
         cache_dir: str = paths.CACHE_DIR,
-        device: Optional[str] = "cpu",
         verbose: bool = False,
         hamming_mode: str = "none",
         correct: bool = False,
@@ -676,16 +676,16 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             secret_key: Secret key for watermarking (same as used for encoding)
             n: Field size parameter (GF(2^n)) (same as used for encoding)
             gf: Galois field instance GF(2^n) (same as used for encoding)
+            device: Device to run on ('cuda' or 'cpu')
             green_list_fraction: Fraction of tokens in green list (same as used for encoding)
             seed: Random seed for reproducibility (same as used for encoding)
             cache_dir: Directory to cache models
-            device: Device to run on ('cuda', 'cpu')
             verbose: Whether to show detailed output
             hamming_mode: Hamming code mode ("none", "standard", "secded")
             correct: Whether to enable Hamming error correction (False = detection-only)
         """
         # Initialize base class (loads tokenizer)
-        super().__init__(model_name, secret_key, n, gf, green_list_fraction, seed, cache_dir, device, verbose)
+        super().__init__(model_name, secret_key, n, gf, device, green_list_fraction, seed, cache_dir, verbose)
 
         # Hamming code setup
         self.hamming_mode = hamming_mode

@@ -22,9 +22,22 @@ import galois
 # Add parent directory to path for src imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import torch
+
 from lib import load_and_prepare_experiments
 from src.llm_watermark import LLMWatermarkDecoder, MCPSolver
 from src.pm_galois import GaloisField
+
+
+def get_device(no_cuda: bool) -> str:
+    """Determine device based on availability and user preference.
+
+    WARNING: torch.randperm produces different results on CPU vs CUDA.
+    The decoder MUST use the same device as was used during encoding.
+    """
+    if no_cuda:
+        return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def parse_args():
@@ -50,6 +63,8 @@ Examples:
                         help="Random seed for reproducibility (default: 42)")
     parser.add_argument("--groups", type=str, default="1",
                         help="Number of contiguous attack groups, or 'budget' for scattered (default: 1)")
+    parser.add_argument("--no-cuda", action="store_true",
+                        help="Disable CUDA even if available")
     return parser.parse_args()
 
 
@@ -251,7 +266,7 @@ class SimulationCache:
 
     def get_decoder(self, model_name: str, secret_key: str, n: int, gf: object,
                     hamming_mode: str, correct: bool, green_fraction: float,
-                    device: str = 'cuda') -> LLMWatermarkDecoder:
+                    device: str) -> LLMWatermarkDecoder:
         """Get or create a decoder for the given parameters.
 
         IMPORTANT: device must match the device used during encoding.
@@ -303,6 +318,7 @@ def run_simulation_for_row(
     cache: SimulationCache,
     max_budget: int,
     groups_arg: str,
+    device: str,
     rng: random.Random
 ) -> List[Dict]:
     """
@@ -314,6 +330,7 @@ def run_simulation_for_row(
         cache: Simulation cache instance
         max_budget: Maximum number of bits to attack
         groups_arg: Number of groups ("1", "5", or "budget")
+        device: Device for decoder ('cuda' or 'cpu')
         rng: Random number generator
 
     Returns:
@@ -349,7 +366,8 @@ def run_simulation_for_row(
         gf=gf,
         hamming_mode=hamming_mode,
         correct=correct if hamming_mode != "none" else False,
-        green_fraction=green_fraction
+        green_fraction=green_fraction,
+        device=device
     )
     cache.timing['decoder'] += time.perf_counter() - t0
 
@@ -489,6 +507,7 @@ def run_simulation(
     prepared_data: Dict,
     max_perturbation_pct: int,
     groups_arg: str,
+    device: str,
     seed: int
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """
@@ -498,6 +517,7 @@ def run_simulation(
         prepared_data: Output from load_and_prepare_experiments()
         max_perturbation_pct: Maximum perturbation rate as percentage
         groups_arg: Number of groups ("1", "5", or "budget")
+        device: Device for decoder ('cuda' or 'cpu')
         seed: Random seed
 
     Returns:
@@ -528,6 +548,7 @@ def run_simulation(
                 cache=cache,
                 max_budget=max_budget,
                 groups_arg=groups_arg,
+                device=device,
                 rng=rng
             )
 
@@ -613,6 +634,10 @@ def main():
     print("Attack Simulation Script")
     print("=" * 40)
 
+    # Determine device
+    device = get_device(args.no_cuda)
+    print(f"Device: {device}")
+
     # Validate groups argument (must be positive int or "budget")
     if args.groups.lower() != "budget":
         try:
@@ -644,6 +669,7 @@ def main():
         prepared_data=prepared_data,
         max_perturbation_pct=args.perturbation_rate,
         groups_arg=args.groups,
+        device=device,
         seed=args.seed
     )
 
