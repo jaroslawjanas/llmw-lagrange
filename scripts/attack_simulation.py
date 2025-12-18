@@ -62,7 +62,8 @@ Examples:
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
     parser.add_argument("--groups", type=str, default="1",
-                        help="Number of contiguous attack groups, or 'budget' for scattered (default: 1)")
+                        help="Comma-separated list of group counts to test (default: 1). "
+                             "Example: '1, 2, 3, 4, 5' tests 1 through 5 groups.")
     parser.add_argument("--no-cuda", action="store_true",
                         help="Disable CUDA even if available")
     return parser.parse_args()
@@ -72,19 +73,32 @@ Examples:
 # Group Helpers
 # =============================================================================
 
-def resolve_num_groups(groups_arg: str, budget: int) -> int:
-    """Resolve --groups argument to an integer.
+def parse_groups_arg(groups_arg: str) -> List[int]:
+    """Parse --groups argument to a list of integers.
 
     Args:
-        groups_arg: Either an integer string or "budget"
-        budget: Current budget value
+        groups_arg: Comma-separated list of integers, e.g., "1, 2, 3, 4, 5"
 
     Returns:
-        Number of groups to use
+        List of group counts to test
+
+    Raises:
+        ValueError: If parsing fails or values are invalid
     """
-    if groups_arg.lower() == "budget":
-        return budget
-    return int(groups_arg)
+    groups = []
+    for part in groups_arg.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        val = int(part)
+        if val < 1:
+            raise ValueError(f"Group count must be >= 1, got {val}")
+        groups.append(val)
+
+    if not groups:
+        raise ValueError("No valid group counts provided")
+
+    return sorted(set(groups))  # Remove duplicates and sort
 
 
 def split_budget(budget: int, num_groups: int) -> List[int]:
@@ -316,8 +330,8 @@ def run_simulation_for_row(
     row: pd.Series,
     config: Dict,
     cache: SimulationCache,
-    max_budget: int,
-    groups_arg: str,
+    budget: int,
+    groups_list: List[int],
     device: str,
     rng: random.Random
 ) -> List[Dict]:
@@ -328,13 +342,13 @@ def run_simulation_for_row(
         row: DataFrame row with generated_ids, a0, a1, etc.
         config: Experiment config dict
         cache: Simulation cache instance
-        max_budget: Maximum number of bits to attack
-        groups_arg: Number of groups ("1", "5", or "budget")
+        budget: Fixed number of tokens to attack
+        groups_list: List of group counts to test
         device: Device for decoder ('cuda' or 'cpu')
         rng: Random number generator
 
     Returns:
-        List of result dicts, one per (budget, attack_type) combination
+        List of result dicts, one per (groups, attack_type) combination
     """
     results = []
 
@@ -376,21 +390,26 @@ def run_simulation_for_row(
     # Parse watermark blocks for matching calculation
     watermark_blocks = json.loads(row['watermark_blocks']) if row.get('watermark_blocks') else []
 
-    # Budget 0: Use original stats from data (no simulation needed)
-    baseline_result = {
-        'budget': 0,
-        'attack_type': 'baseline',
-        'recovered': bool(row['watermark_recovered']),
-        'valid_blocks': int(row.get('unique_valid_blocks', 0)),
-        'matching_blocks': int(row.get('unique_matching_blocks', 0))
-    }
+    # Baseline (groups=0): Use original stats from data (no attack)
+    baseline_recovered = bool(row['watermark_recovered'])
+    baseline_valid = int(row.get('unique_valid_blocks', 0))
+    baseline_matching = int(row.get('unique_matching_blocks', 0))
 
-    # For budget > 0: run attacks
     attack_types = ['insertion', 'deletion', 'substitution']
 
-    for budget in range(1, max_budget + 1):
-        # Resolve groups for this budget (handles "budget" special value)
-        num_groups = resolve_num_groups(groups_arg, budget)
+    # Add baseline for all attack types (groups=0 means no attack)
+    for attack_type in attack_types:
+        results.append({
+            'groups': 0,
+            'attack_type': attack_type,
+            'recovered': baseline_recovered,
+            'valid_blocks': baseline_valid,
+            'matching_blocks': baseline_matching
+        })
+
+    # For groups > 0: run attacks with fixed budget split into N groups
+    for num_groups in groups_list:
+        # Can't have more groups than budget
         effective_groups = min(num_groups, budget)
         group_sizes = split_budget(budget, effective_groups)
 
@@ -402,7 +421,9 @@ def run_simulation_for_row(
                 max_deletable = len(generated_ids) - 1
                 if budget > max_deletable:
                     # Reduce budget for this specific attack
-                    adjusted_sizes = split_budget(max_deletable, min(effective_groups, max_deletable))
+                    adjusted_budget = max_deletable
+                    adjusted_groups = min(effective_groups, max_deletable)
+                    adjusted_sizes = split_budget(adjusted_budget, adjusted_groups)
                 else:
                     adjusted_sizes = group_sizes
                 attack_group_sizes = adjusted_sizes
@@ -412,7 +433,7 @@ def run_simulation_for_row(
             # Skip if no valid attack possible
             if not attack_group_sizes or sum(attack_group_sizes) == 0:
                 results.append({
-                    'budget': budget,
+                    'groups': num_groups,
                     'attack_type': attack_type,
                     'recovered': False,
                     'valid_blocks': 0,
@@ -431,7 +452,7 @@ def run_simulation_for_row(
             except ValueError:
                 # Groups don't fit
                 results.append({
-                    'budget': budget,
+                    'groups': num_groups,
                     'attack_type': attack_type,
                     'recovered': False,
                     'valid_blocks': 0,
@@ -451,7 +472,7 @@ def run_simulation_for_row(
             # Skip if attacked list is too short
             if len(attacked_ids) < decoder.tokens_per_block:
                 results.append({
-                    'budget': budget,
+                    'groups': num_groups,
                     'attack_type': attack_type,
                     'recovered': False,
                     'valid_blocks': 0,
@@ -483,30 +504,20 @@ def run_simulation_for_row(
             unique_matching = len(set((b['x'], b['y']) for b in verification.get('matching_blocks', [])))
 
             results.append({
-                'budget': budget,
+                'groups': num_groups,
                 'attack_type': attack_type,
                 'recovered': verification['is_valid'],
                 'valid_blocks': unique_valid,
                 'matching_blocks': unique_matching
             })
 
-    # Add baseline for all attack types (they all start from same point)
-    for attack_type in attack_types:
-        results.append({
-            'budget': 0,
-            'attack_type': attack_type,
-            'recovered': baseline_result['recovered'],
-            'valid_blocks': baseline_result['valid_blocks'],
-            'matching_blocks': baseline_result['matching_blocks']
-        })
-
     return results
 
 
 def run_simulation(
     prepared_data: Dict,
-    max_perturbation_pct: int,
-    groups_arg: str,
+    perturbation_pct: int,
+    groups_list: List[int],
     device: str,
     seed: int
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
@@ -515,8 +526,8 @@ def run_simulation(
 
     Args:
         prepared_data: Output from load_and_prepare_experiments()
-        max_perturbation_pct: Maximum perturbation rate as percentage
-        groups_arg: Number of groups ("1", "5", or "budget")
+        perturbation_pct: Perturbation rate as percentage (fixed budget)
+        groups_list: List of group counts to test
         device: Device for decoder ('cuda' or 'cpu')
         seed: Random seed
 
@@ -537,17 +548,17 @@ def run_simulation(
         print(f"  Rows: {len(df)}")
 
         for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"  Processing"):
-            # Calculate max budget for this row
+            # Calculate fixed budget for this row
             tokens_length = int(row['tokens_length'])
-            max_budget = max(1, int(tokens_length * max_perturbation_pct / 100))
+            budget = max(1, int(tokens_length * perturbation_pct / 100))
 
             # Run simulation
             row_results = run_simulation_for_row(
                 row=row,
                 config=config,
                 cache=cache,
-                max_budget=max_budget,
-                groups_arg=groups_arg,
+                budget=budget,
+                groups_list=groups_list,
                 device=device,
                 rng=rng
             )
@@ -557,8 +568,8 @@ def run_simulation(
                 result['model'] = model
                 result['row_idx'] = idx
                 result['tokens_length'] = tokens_length
-                result['max_budget'] = max_budget
-                result['budget_pct'] = result['budget'] / tokens_length * 100 if tokens_length > 0 else 0
+                result['budget'] = budget
+                result['budget_pct'] = budget / tokens_length * 100 if tokens_length > 0 else 0
                 all_results.append(result)
 
         cache.print_timing()
@@ -574,7 +585,8 @@ def run_simulation(
 # Reporting
 # =============================================================================
 
-def format_summary_report(results_df: pd.DataFrame, args, timing: dict = None) -> str:
+def format_summary_report(results_df: pd.DataFrame, args, groups_list: List[int],
+                          timing: dict = None) -> str:
     """Generate text summary of attack simulation results."""
     lines = []
     w = 80
@@ -583,7 +595,7 @@ def format_summary_report(results_df: pd.DataFrame, args, timing: dict = None) -
     lines.append('ATTACK SIMULATION REPORT')
     lines.append('=' * w)
     lines.append(f'Perturbation Rate: {args.perturbation_rate}%')
-    lines.append(f'Groups: {args.groups}')
+    lines.append(f'Groups Tested: {groups_list}')
     lines.append(f'Seed: {args.seed}')
     lines.append(f'Total Simulations: {len(results_df)}')
 
@@ -606,22 +618,69 @@ def format_summary_report(results_df: pd.DataFrame, args, timing: dict = None) -
     lines.append('-' * w)
     lines.append('RECOVERY RATE BY ATTACK TYPE')
     lines.append('-' * w)
-    lines.append(f"{'Attack Type':<15} {'Budget=0':<12} {'Budget=Max':<12} {'Avg Drop':<12}")
+    lines.append(f"{'Attack Type':<15} {'Baseline':<12} {'Max Groups':<12} {'Drop':<12}")
 
     for attack_type in attack_types:
         attack_data = results_df[results_df['attack_type'] == attack_type]
 
-        budget_0 = attack_data[attack_data['budget'] == 0]['recovered'].mean() * 100
-        max_budget = attack_data['budget'].max()
-        budget_max = attack_data[attack_data['budget'] == max_budget]['recovered'].mean() * 100
-        drop = budget_0 - budget_max
+        baseline = attack_data[attack_data['groups'] == 0]['recovered'].mean() * 100
+        max_groups = attack_data['groups'].max()
+        max_groups_rate = attack_data[attack_data['groups'] == max_groups]['recovered'].mean() * 100
+        drop = baseline - max_groups_rate
 
-        lines.append(f"  {attack_type.capitalize():<13} {budget_0:>10.1f}% {budget_max:>10.1f}% {drop:>10.1f}%")
+        lines.append(f"  {attack_type.capitalize():<13} {baseline:>10.1f}% {max_groups_rate:>10.1f}% {drop:>10.1f}%")
 
     lines.append('')
     lines.append('=' * w)
 
     return '\n'.join(lines)
+
+
+def generate_recovery_graph(results_df: pd.DataFrame, output_path: Path,
+                            perturbation_pct: int) -> None:
+    """Generate PNG with 3 subplots showing recovery rate vs groups for each attack type.
+
+    Args:
+        results_df: DataFrame with simulation results
+        output_path: Path to save the PNG file
+        perturbation_pct: Perturbation rate used (for title)
+    """
+    attack_types = ['insertion', 'deletion', 'substitution']
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle(f'Watermark Recovery Rate vs Attack Groups (Budget: {perturbation_pct}% of tokens)',
+                 fontsize=14, fontweight='bold')
+
+    for ax, attack_type in zip(axes, attack_types):
+        attack_data = results_df[results_df['attack_type'] == attack_type]
+
+        # Calculate recovery rate per group count
+        recovery_by_groups = attack_data.groupby('groups')['recovered'].mean() * 100
+        groups = recovery_by_groups.index.tolist()
+        rates = recovery_by_groups.values.tolist()
+
+        # Plot
+        ax.plot(groups, rates, marker='o', linewidth=2, markersize=6)
+        ax.set_xlabel('Number of Attack Groups', fontsize=11)
+        ax.set_ylabel('Recovery Rate (%)', fontsize=11)
+        ax.set_title(attack_type.capitalize(), fontsize=12, fontweight='bold')
+        ax.set_ylim(0, 105)
+        ax.grid(True, alpha=0.3)
+
+        # Add baseline annotation
+        if 0 in groups:
+            baseline_rate = recovery_by_groups[0]
+            ax.axhline(y=baseline_rate, color='green', linestyle='--', alpha=0.5,
+                       label=f'Baseline: {baseline_rate:.1f}%')
+            ax.legend(loc='lower right')
+
+        # Set x-axis ticks to integers only
+        ax.set_xticks(groups)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved graph: {output_path}")
 
 
 # =============================================================================
@@ -638,16 +697,14 @@ def main():
     device = get_device(args.no_cuda)
     print(f"Device: {device}")
 
-    # Validate groups argument (must be positive int or "budget")
-    if args.groups.lower() != "budget":
-        try:
-            g = int(args.groups)
-            if g < 1:
-                print("Error: --groups must be >= 1 or 'budget'")
-                return 1
-        except ValueError:
-            print("Error: --groups must be a positive integer or 'budget'")
-            return 1
+    # Parse groups argument
+    try:
+        groups_list = parse_groups_arg(args.groups)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    print(f"Groups to test: {groups_list}")
 
     # Validate perturbation rate
     if args.perturbation_rate >= 100:
@@ -667,8 +724,8 @@ def main():
     # Run simulation
     results_df, timing = run_simulation(
         prepared_data=prepared_data,
-        max_perturbation_pct=args.perturbation_rate,
-        groups_arg=args.groups,
+        perturbation_pct=args.perturbation_rate,
+        groups_list=groups_list,
         device=device,
         seed=args.seed
     )
@@ -683,8 +740,12 @@ def main():
     results_df.to_csv(results_path, index=False)
     print(f"\nSaved results: {results_path}")
 
+    # Generate recovery rate graph
+    graph_path = output_dir / "recovery_rate.png"
+    generate_recovery_graph(results_df, graph_path, args.perturbation_rate)
+
     # Generate and save summary
-    summary = format_summary_report(results_df, args, timing)
+    summary = format_summary_report(results_df, args, groups_list, timing)
     summary_path = output_dir / "attack_summary.txt"
     summary_path.write_text(summary)
     print(f"Saved summary: {summary_path}")
