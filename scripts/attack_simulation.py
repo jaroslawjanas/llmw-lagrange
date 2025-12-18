@@ -6,12 +6,15 @@ and measures watermark recovery rate at various attack budgets.
 """
 import argparse
 import json
+import multiprocessing as mp
 import random
+import shutil
 import sys
 import time
 from datetime import datetime
+from multiprocessing import cpu_count
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 import numpy as np
 import pandas as pd
@@ -66,6 +69,8 @@ Examples:
                              "Example: '1, 2, 3, 4, 5' tests 1 through 5 groups.")
     parser.add_argument("--no-cuda", action="store_true",
                         help="Disable CUDA even if available")
+    parser.add_argument("-j", "--workers", type=int, default=0,
+                        help="Number of worker processes (0=auto, 1=serial, default: 0)")
     return parser.parse_args()
 
 
@@ -323,6 +328,82 @@ class SimulationCache:
 
 
 # =============================================================================
+# Multiprocessing Support
+# =============================================================================
+
+# Worker process state (initialized once per worker)
+_worker_state: Dict[str, Any] = {}
+
+
+class RowWrapper:
+    """Wrapper to provide dict-like access to row data for multiprocessing."""
+
+    def __init__(self, data: Dict[str, Any]):
+        self._data = data
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
+
+def _init_worker(device: str) -> None:
+    """Initialize worker process with its own decoder cache.
+
+    Called once per worker process at pool creation.
+    """
+    global _worker_state
+    _worker_state = {
+        'cache': SimulationCache(),
+        'device': device,
+    }
+
+
+def _process_row_task(task: Dict) -> Tuple[List[Dict], Dict[str, float]]:
+    """Process a single row in a worker process.
+
+    Args:
+        task: Dict containing row data and configuration
+
+    Returns:
+        Tuple of (result dicts for this row, timing dict)
+    """
+    global _worker_state
+
+    cache = _worker_state['cache']
+    device = _worker_state['device']
+
+    # Reset timing for this row
+    cache.timing = {'gf_mcp': 0.0, 'decoder': 0.0, 'attack': 0.0, 'decode': 0.0, 'mcp': 0.0}
+
+    # Wrap row data for dict-like access
+    row = RowWrapper(task['row'])
+    rng = random.Random(task['seed'])
+
+    # Run simulation for this row
+    results = run_simulation_for_row(
+        row=row,
+        config=task['config'],
+        cache=cache,
+        budget=task['budget'],
+        groups_list=task['groups_list'],
+        device=device,
+        rng=rng
+    )
+
+    # Add metadata to results
+    for r in results:
+        r['model'] = task['model']
+        r['row_idx'] = task['row_idx']
+        r['tokens_length'] = task['tokens_length']
+        r['budget'] = task['budget']
+        r['budget_pct'] = task['budget'] / task['tokens_length'] * 100 if task['tokens_length'] > 0 else 0
+
+    return results, cache.timing.copy()
+
+
+# =============================================================================
 # Core Simulation
 # =============================================================================
 
@@ -534,7 +615,6 @@ def run_simulation(
     Returns:
         Tuple of (DataFrame with simulation results, timing dict)
     """
-    rng = random.Random(seed)
     cache = SimulationCache()
     all_results = []
     total_timing = {'gf_mcp': 0.0, 'decoder': 0.0, 'attack': 0.0, 'decode': 0.0, 'mcp': 0.0}
@@ -552,6 +632,9 @@ def run_simulation(
             tokens_length = int(row['tokens_length'])
             budget = max(1, int(tokens_length * perturbation_pct / 100))
 
+            # Deterministic RNG per row (matches parallel mode)
+            row_rng = random.Random(seed + idx)
+
             # Run simulation
             row_results = run_simulation_for_row(
                 row=row,
@@ -560,7 +643,7 @@ def run_simulation(
                 budget=budget,
                 groups_list=groups_list,
                 device=device,
-                rng=rng
+                rng=row_rng
             )
 
             # Add row metadata to results
@@ -581,12 +664,83 @@ def run_simulation(
     return pd.DataFrame(all_results), total_timing
 
 
+def run_simulation_parallel(
+    prepared_data: Dict,
+    perturbation_pct: int,
+    groups_list: List[int],
+    device: str,
+    seed: int,
+    num_workers: int
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """
+    Run attack simulation in parallel across all models and rows.
+
+    Args:
+        prepared_data: Output from load_and_prepare_experiments()
+        perturbation_pct: Perturbation rate as percentage (fixed budget)
+        groups_list: List of group counts to test
+        device: Device for decoder ('cuda' or 'cpu')
+        seed: Random seed
+        num_workers: Number of worker processes
+
+    Returns:
+        Tuple of (DataFrame with simulation results, aggregated timing dict)
+    """
+    all_results = []
+    total_timing = {'gf_mcp': 0.0, 'decoder': 0.0, 'attack': 0.0, 'decode': 0.0, 'mcp': 0.0}
+
+    for model, model_data in prepared_data.items():
+        df = model_data['df']
+        config = model_data['config']
+
+        print(f"\nSimulating attacks for model: {model}")
+        print(f"  Rows: {len(df)}, Workers: {num_workers}")
+
+        # Prepare tasks - one per row
+        tasks = []
+        for idx, row in df.iterrows():
+            tokens_length = int(row['tokens_length'])
+            budget = max(1, int(tokens_length * perturbation_pct / 100))
+            row_seed = seed + idx  # Deterministic seed per row
+
+            tasks.append({
+                'row': row.to_dict(),
+                'config': config,
+                'budget': budget,
+                'groups_list': groups_list,
+                'model': model,
+                'row_idx': idx,
+                'tokens_length': tokens_length,
+                'seed': row_seed,
+            })
+
+        # Process in parallel
+        # Use 'spawn' on Windows/macOS for CUDA compatibility
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(
+            processes=num_workers,
+            initializer=_init_worker,
+            initargs=(device,)
+        ) as pool:
+            for results, row_timing in tqdm(
+                pool.imap_unordered(_process_row_task, tasks),
+                total=len(tasks),
+                desc=f"  Processing"
+            ):
+                all_results.extend(results)
+                # Aggregate timing
+                for key in total_timing:
+                    total_timing[key] += row_timing.get(key, 0.0)
+
+    return pd.DataFrame(all_results), total_timing
+
+
 # =============================================================================
 # Reporting
 # =============================================================================
 
 def format_summary_report(results_df: pd.DataFrame, args, groups_list: List[int],
-                          timing: dict = None) -> str:
+                          timing: dict = None, source_dirs: List[str] = None) -> str:
     """Generate text summary of attack simulation results."""
     lines = []
     w = 80
@@ -598,6 +752,15 @@ def format_summary_report(results_df: pd.DataFrame, args, groups_list: List[int]
     lines.append(f'Groups Tested: {groups_list}')
     lines.append(f'Seed: {args.seed}')
     lines.append(f'Total Simulations: {len(results_df)}')
+
+    # List source directories if available
+    if source_dirs and len(source_dirs) > 0:
+        lines.append('')
+        lines.append('-' * w)
+        lines.append(f'SOURCE EXPERIMENTS ({len(source_dirs)})')
+        lines.append('-' * w)
+        for src in sorted(source_dirs):
+            lines.append(f'  {src}')
 
     # Add timing breakdown if available
     if timing:
@@ -711,6 +874,14 @@ def main():
         print("Error: --perturbation-rate must be < 100")
         return 1
 
+    # Determine number of workers
+    if args.workers == 0:
+        num_workers = min(cpu_count(), 8)  # Auto: use up to 8 cores
+    else:
+        num_workers = args.workers
+
+    print(f"Workers: {num_workers}" + (" (serial)" if num_workers == 1 else " (parallel)"))
+
     # Set random seed
     random.seed(args.seed)
 
@@ -721,19 +892,47 @@ def main():
         verbose=True
     )
 
-    # Run simulation
-    results_df, timing = run_simulation(
-        prepared_data=prepared_data,
-        perturbation_pct=args.perturbation_rate,
-        groups_list=groups_list,
-        device=device,
-        seed=args.seed
-    )
+    # Run simulation (serial or parallel)
+    t_start = time.perf_counter()
+    if num_workers == 1:
+        results_df, timing = run_simulation(
+            prepared_data=prepared_data,
+            perturbation_pct=args.perturbation_rate,
+            groups_list=groups_list,
+            device=device,
+            seed=args.seed
+        )
+    else:
+        results_df, timing = run_simulation_parallel(
+            prepared_data=prepared_data,
+            perturbation_pct=args.perturbation_rate,
+            groups_list=groups_list,
+            device=device,
+            seed=args.seed,
+            num_workers=num_workers
+        )
+    elapsed = time.perf_counter() - t_start
+    print(f"\nSimulation completed in {elapsed:.1f}s")
+
+    # Collect all source directories
+    all_source_dirs = []
+    for model_data in prepared_data.values():
+        all_source_dirs.extend(model_data.get('sources', []))
 
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.output_dir) / f"run_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy source configs
+    if all_source_dirs:
+        configs_dir = output_dir / 'source_configs'
+        configs_dir.mkdir(exist_ok=True)
+        for source_dir in all_source_dirs:
+            config_src = Path('output') / source_dir / 'run_config.json'
+            if config_src.exists():
+                config_dst = configs_dir / f'{source_dir}.json'
+                shutil.copy(config_src, config_dst)
 
     # Save results
     results_path = output_dir / "attack_results.csv"
@@ -745,7 +944,7 @@ def main():
     generate_recovery_graph(results_df, graph_path, args.perturbation_rate)
 
     # Generate and save summary
-    summary = format_summary_report(results_df, args, groups_list, timing)
+    summary = format_summary_report(results_df, args, groups_list, timing, all_source_dirs)
     summary_path = output_dir / "attack_summary.txt"
     summary_path.write_text(summary)
     print(f"Saved summary: {summary_path}")
