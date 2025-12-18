@@ -48,21 +48,104 @@ Examples:
                         help="Proceed even with conflicting parameters")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
+    parser.add_argument("--groups", type=str, default="1",
+                        help="Number of contiguous attack groups, or 'budget' for scattered (default: 1)")
     return parser.parse_args()
+
+
+# =============================================================================
+# Group Helpers
+# =============================================================================
+
+def resolve_num_groups(groups_arg: str, budget: int) -> int:
+    """Resolve --groups argument to an integer.
+
+    Args:
+        groups_arg: Either an integer string or "budget"
+        budget: Current budget value
+
+    Returns:
+        Number of groups to use
+    """
+    if groups_arg.lower() == "budget":
+        return budget
+    return int(groups_arg)
+
+
+def split_budget(budget: int, num_groups: int) -> List[int]:
+    """Split budget into num_groups sizes.
+
+    Example: split_budget(10, 3) → [4, 3, 3]
+    """
+    if num_groups <= 0:
+        return []
+    num_groups = min(num_groups, budget)  # Can't have more groups than budget
+    if num_groups == 0:
+        return []
+
+    base = budget // num_groups
+    remainder = budget % num_groups
+    return [base + 1] * remainder + [base] * (num_groups - remainder)
+
+
+def distribute_gaps(free_space: int, num_gaps: int, rng: random.Random) -> List[int]:
+    """Randomly distribute free_space among num_gaps bins.
+
+    Example: distribute_gaps(10, 3, rng) might return [3, 4, 3]
+    """
+    if num_gaps <= 0:
+        return []
+    if free_space <= 0:
+        return [0] * num_gaps
+
+    gaps = [0] * num_gaps
+    for _ in range(free_space):
+        gaps[rng.randint(0, num_gaps - 1)] += 1
+    return gaps
+
+
+def compute_group_positions(text_length: int, group_sizes: List[int],
+                            rng: random.Random) -> List[int]:
+    """Compute non-overlapping start positions for groups.
+
+    Returns list of start positions, one per group.
+    Raises ValueError if groups don't fit.
+    """
+    if not group_sizes:
+        return []
+
+    total_budget = sum(group_sizes)
+    free_space = text_length - total_budget
+
+    if free_space < 0:
+        raise ValueError(f"Groups don't fit: need {total_budget}, have {text_length}")
+
+    num_gaps = len(group_sizes) + 1
+    gaps = distribute_gaps(free_space, num_gaps, rng)
+
+    positions = []
+    current_pos = gaps[0]
+    for i, size in enumerate(group_sizes):
+        positions.append(current_pos)
+        current_pos += size + gaps[i + 1]
+
+    return positions
 
 
 # =============================================================================
 # Attack Functions
 # =============================================================================
 
-def insertion_attack(token_ids: List[int], num_insertions: int, vocab_size: int,
+def insertion_attack(token_ids: List[int], group_sizes: List[int],
+                     positions: List[int], vocab_size: int,
                      rng: random.Random) -> List[int]:
     """
-    Insert random tokens at random positions.
+    Insert contiguous groups of random tokens at specified positions.
 
     Args:
         token_ids: Original token IDs
-        num_insertions: Number of tokens to insert
+        group_sizes: List of sizes for each group to insert
+        positions: List of start positions for each group
         vocab_size: Vocabulary size for random token generation
         rng: Random number generator
 
@@ -70,44 +153,50 @@ def insertion_attack(token_ids: List[int], num_insertions: int, vocab_size: int,
         Modified token IDs with insertions
     """
     result = token_ids.copy()
-    for _ in range(num_insertions):
-        pos = rng.randint(0, len(result))
-        token = rng.randint(0, vocab_size - 1)
-        result.insert(pos, token)
+
+    # Process right-to-left to maintain position validity
+    for size, pos in sorted(zip(group_sizes, positions), key=lambda x: -x[1]):
+        tokens_to_insert = [rng.randint(0, vocab_size - 1) for _ in range(size)]
+        # Insert all tokens at position (they become contiguous)
+        for i, token in enumerate(tokens_to_insert):
+            result.insert(pos + i, token)
+
     return result
 
 
-def deletion_attack(token_ids: List[int], num_deletions: int,
-                    rng: random.Random) -> List[int]:
+def deletion_attack(token_ids: List[int], group_sizes: List[int],
+                    positions: List[int], rng: random.Random) -> List[int]:
     """
-    Delete tokens at random positions.
+    Delete contiguous groups of tokens at specified positions.
 
     Args:
         token_ids: Original token IDs
-        num_deletions: Number of tokens to delete
+        group_sizes: List of sizes for each group to delete
+        positions: List of start positions for each group
         rng: Random number generator
 
     Returns:
         Modified token IDs with deletions
     """
     result = token_ids.copy()
-    # Cap deletions to avoid empty list
-    actual_deletions = min(num_deletions, len(result) - 1)
-    for _ in range(actual_deletions):
-        if len(result) > 1:
-            pos = rng.randint(0, len(result) - 1)
-            del result[pos]
+
+    # Process right-to-left to maintain position validity
+    for size, pos in sorted(zip(group_sizes, positions), key=lambda x: -x[1]):
+        del result[pos:pos + size]
+
     return result
 
 
-def substitution_attack(token_ids: List[int], num_substitutions: int, vocab_size: int,
+def substitution_attack(token_ids: List[int], group_sizes: List[int],
+                        positions: List[int], vocab_size: int,
                         rng: random.Random) -> List[int]:
     """
-    Replace tokens at random positions with random tokens.
+    Replace contiguous groups of tokens with random tokens.
 
     Args:
         token_ids: Original token IDs
-        num_substitutions: Number of tokens to substitute
+        group_sizes: List of sizes for each group to substitute
+        positions: List of start positions for each group
         vocab_size: Vocabulary size for random token generation
         rng: Random number generator
 
@@ -115,11 +204,12 @@ def substitution_attack(token_ids: List[int], num_substitutions: int, vocab_size
         Modified token IDs with substitutions
     """
     result = token_ids.copy()
-    # Cap substitutions to list length
-    actual_subs = min(num_substitutions, len(result))
-    positions = rng.sample(range(len(result)), actual_subs)
-    for pos in positions:
-        result[pos] = rng.randint(0, vocab_size - 1)
+
+    for size, pos in zip(group_sizes, positions):
+        for i in range(size):
+            if pos + i < len(result):
+                result[pos + i] = rng.randint(0, vocab_size - 1)
+
     return result
 
 
@@ -160,8 +250,13 @@ class SimulationCache:
         return self._mcp_solvers[n]
 
     def get_decoder(self, model_name: str, secret_key: str, n: int, gf: object,
-                    hamming_mode: str, correct: bool, green_fraction: float) -> LLMWatermarkDecoder:
-        """Get or create a decoder for the given parameters."""
+                    hamming_mode: str, correct: bool, green_fraction: float,
+                    device: str = 'cuda') -> LLMWatermarkDecoder:
+        """Get or create a decoder for the given parameters.
+
+        IMPORTANT: device must match the device used during encoding.
+        torch.randperm produces different results on CPU vs CUDA.
+        """
         # Cache key based on model (tokenizer is model-specific)
         cache_key = model_name
 
@@ -174,6 +269,7 @@ class SimulationCache:
                 hamming_mode=hamming_mode,
                 correct=correct,
                 green_list_fraction=green_fraction,
+                device=device,
                 verbose=False
             )
 
@@ -185,6 +281,7 @@ class SimulationCache:
         decoder.hamming_mode = hamming_mode
         decoder.correct = correct
         decoder.green_list_fraction = green_fraction
+        decoder.device = device
 
         # Update hamming instance if mode changed
         if hamming_mode != "none":
@@ -205,6 +302,7 @@ def run_simulation_for_row(
     config: Dict,
     cache: SimulationCache,
     max_budget: int,
+    groups_arg: str,
     rng: random.Random
 ) -> List[Dict]:
     """
@@ -215,6 +313,7 @@ def run_simulation_for_row(
         config: Experiment config dict
         cache: Simulation cache instance
         max_budget: Maximum number of bits to attack
+        groups_arg: Number of groups ("1", "5", or "budget")
         rng: Random number generator
 
     Returns:
@@ -272,15 +371,63 @@ def run_simulation_for_row(
     attack_types = ['insertion', 'deletion', 'substitution']
 
     for budget in range(1, max_budget + 1):
+        # Resolve groups for this budget (handles "budget" special value)
+        num_groups = resolve_num_groups(groups_arg, budget)
+        effective_groups = min(num_groups, budget)
+        group_sizes = split_budget(budget, effective_groups)
+
         for attack_type in attack_types:
-            # Apply attack
             t0 = time.perf_counter()
+
+            # For deletion, ensure we don't delete more than len-1 tokens
+            if attack_type == 'deletion':
+                max_deletable = len(generated_ids) - 1
+                if budget > max_deletable:
+                    # Reduce budget for this specific attack
+                    adjusted_sizes = split_budget(max_deletable, min(effective_groups, max_deletable))
+                else:
+                    adjusted_sizes = group_sizes
+                attack_group_sizes = adjusted_sizes
+            else:
+                attack_group_sizes = group_sizes
+
+            # Skip if no valid attack possible
+            if not attack_group_sizes or sum(attack_group_sizes) == 0:
+                results.append({
+                    'budget': budget,
+                    'attack_type': attack_type,
+                    'recovered': False,
+                    'valid_blocks': 0,
+                    'matching_blocks': 0
+                })
+                continue
+
+            # Compute positions based on attack type
+            try:
+                if attack_type == 'insertion':
+                    # For insertion, positions are in original text (can insert at len+1 positions)
+                    positions = compute_group_positions(len(generated_ids) + 1, attack_group_sizes, rng)
+                else:
+                    # For deletion/substitution, positions are token indices
+                    positions = compute_group_positions(len(generated_ids), attack_group_sizes, rng)
+            except ValueError:
+                # Groups don't fit
+                results.append({
+                    'budget': budget,
+                    'attack_type': attack_type,
+                    'recovered': False,
+                    'valid_blocks': 0,
+                    'matching_blocks': 0
+                })
+                continue
+
+            # Apply attack
             if attack_type == 'insertion':
-                attacked_ids = insertion_attack(generated_ids, budget, vocab_size, rng)
+                attacked_ids = insertion_attack(generated_ids, attack_group_sizes, positions, vocab_size, rng)
             elif attack_type == 'deletion':
-                attacked_ids = deletion_attack(generated_ids, budget, rng)
+                attacked_ids = deletion_attack(generated_ids, attack_group_sizes, positions, rng)
             else:  # substitution
-                attacked_ids = substitution_attack(generated_ids, budget, vocab_size, rng)
+                attacked_ids = substitution_attack(generated_ids, attack_group_sizes, positions, vocab_size, rng)
             cache.timing['attack'] += time.perf_counter() - t0
 
             # Skip if attacked list is too short
@@ -341,6 +488,7 @@ def run_simulation_for_row(
 def run_simulation(
     prepared_data: Dict,
     max_perturbation_pct: int,
+    groups_arg: str,
     seed: int
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """
@@ -349,6 +497,7 @@ def run_simulation(
     Args:
         prepared_data: Output from load_and_prepare_experiments()
         max_perturbation_pct: Maximum perturbation rate as percentage
+        groups_arg: Number of groups ("1", "5", or "budget")
         seed: Random seed
 
     Returns:
@@ -378,6 +527,7 @@ def run_simulation(
                 config=config,
                 cache=cache,
                 max_budget=max_budget,
+                groups_arg=groups_arg,
                 rng=rng
             )
 
@@ -400,80 +550,8 @@ def run_simulation(
 
 
 # =============================================================================
-# Visualization
+# Reporting
 # =============================================================================
-
-def create_match_rate_plot(results_df: pd.DataFrame, output_path: Path):
-    """
-    Create line plot of match rate vs attack budget.
-
-    X-axis: Budget (number of attacked bits)
-    Y-axis: Match rate (0-100%)
-    3 lines: Insertion, Deletion, Substitution
-    """
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    attack_types = ['insertion', 'deletion', 'substitution']
-    colors = {'insertion': 'blue', 'deletion': 'red', 'substitution': 'green'}
-
-    for attack_type in attack_types:
-        attack_data = results_df[results_df['attack_type'] == attack_type]
-
-        # Group by budget and calculate mean match rate
-        grouped = attack_data.groupby('budget')['recovered'].mean() * 100
-
-        ax.plot(grouped.index, grouped.values,
-                label=attack_type.capitalize(),
-                color=colors[attack_type],
-                marker='o', markersize=3, linewidth=1.5)
-
-    ax.set_xlabel('Attack Budget (bits)', fontsize=12)
-    ax.set_ylabel('Watermark Recovery Rate (%)', fontsize=12)
-    ax.set_title('Watermark Recovery Rate Under Attack', fontsize=14, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 105)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-
-
-def create_blocks_plot(results_df: pd.DataFrame, output_path: Path):
-    """
-    Create line plot of block counts vs attack budget.
-
-    Shows valid_blocks and matching_blocks for each attack type.
-    """
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-    attack_types = ['insertion', 'deletion', 'substitution']
-
-    for ax, attack_type in zip(axes, attack_types):
-        attack_data = results_df[results_df['attack_type'] == attack_type]
-
-        # Group by budget
-        grouped = attack_data.groupby('budget').agg({
-            'valid_blocks': 'mean',
-            'matching_blocks': 'mean'
-        })
-
-        ax.plot(grouped.index, grouped['valid_blocks'],
-                label='Valid Blocks', color='blue', marker='o', markersize=3)
-        ax.plot(grouped.index, grouped['matching_blocks'],
-                label='Matching Blocks', color='orange', marker='s', markersize=3)
-
-        ax.set_xlabel('Attack Budget (bits)')
-        ax.set_ylabel('Average Block Count')
-        ax.set_title(f'{attack_type.capitalize()} Attack')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-    fig.suptitle('Block Counts Under Attack', fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-
 
 def format_summary_report(results_df: pd.DataFrame, args, timing: dict = None) -> str:
     """Generate text summary of attack simulation results."""
@@ -484,6 +562,7 @@ def format_summary_report(results_df: pd.DataFrame, args, timing: dict = None) -
     lines.append('ATTACK SIMULATION REPORT')
     lines.append('=' * w)
     lines.append(f'Perturbation Rate: {args.perturbation_rate}%')
+    lines.append(f'Groups: {args.groups}')
     lines.append(f'Seed: {args.seed}')
     lines.append(f'Total Simulations: {len(results_df)}')
 
@@ -534,6 +613,22 @@ def main():
     print("Attack Simulation Script")
     print("=" * 40)
 
+    # Validate groups argument (must be positive int or "budget")
+    if args.groups.lower() != "budget":
+        try:
+            g = int(args.groups)
+            if g < 1:
+                print("Error: --groups must be >= 1 or 'budget'")
+                return 1
+        except ValueError:
+            print("Error: --groups must be a positive integer or 'budget'")
+            return 1
+
+    # Validate perturbation rate
+    if args.perturbation_rate >= 100:
+        print("Error: --perturbation-rate must be < 100")
+        return 1
+
     # Set random seed
     random.seed(args.seed)
 
@@ -548,6 +643,7 @@ def main():
     results_df, timing = run_simulation(
         prepared_data=prepared_data,
         max_perturbation_pct=args.perturbation_rate,
+        groups_arg=args.groups,
         seed=args.seed
     )
 
@@ -560,15 +656,6 @@ def main():
     results_path = output_dir / "attack_results.csv"
     results_df.to_csv(results_path, index=False)
     print(f"\nSaved results: {results_path}")
-
-    # Generate plots
-    match_rate_path = output_dir / "match_rate_vs_budget.png"
-    create_match_rate_plot(results_df, match_rate_path)
-    print(f"Saved plot: {match_rate_path}")
-
-    blocks_path = output_dir / "blocks_vs_budget.png"
-    create_blocks_plot(results_df, blocks_path)
-    print(f"Saved plot: {blocks_path}")
 
     # Generate and save summary
     summary = format_summary_report(results_df, args, timing)

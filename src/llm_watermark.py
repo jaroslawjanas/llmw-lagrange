@@ -35,6 +35,10 @@ def _compute_vocab_split(
     """
     Cached vocab split computation.
 
+    WARNING: torch.randperm produces different results on CPU vs CUDA even with same seed.
+    The decoder MUST use the same device as was used during encoding for correct results.
+    This also applies to any scripts that use the decoder (e.g., attack_simulation.py).
+
     Args:
         token_id: Previous token ID to hash
         secret_key: Secret key for watermarking
