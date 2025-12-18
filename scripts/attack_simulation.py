@@ -740,7 +740,8 @@ def run_simulation_parallel(
 # =============================================================================
 
 def format_summary_report(results_df: pd.DataFrame, args, groups_list: List[int],
-                          timing: dict = None, source_dirs: List[str] = None) -> str:
+                          timing: dict = None, source_dirs: List[str] = None,
+                          elapsed: float = None) -> str:
     """Generate text summary of attack simulation results."""
     lines = []
     w = 80
@@ -766,32 +767,56 @@ def format_summary_report(results_df: pd.DataFrame, args, groups_list: List[int]
     if timing:
         lines.append('')
         lines.append('-' * w)
-        lines.append('TIMING BREAKDOWN')
+        lines.append('TIMING BREAKDOWN (aggregate CPU time)')
         lines.append('-' * w)
         total = sum(timing.values())
         for name, t in sorted(timing.items(), key=lambda x: -x[1]):
             pct = t / total * 100 if total > 0 else 0
             lines.append(f"  {name:12}: {t:8.2f}s ({pct:5.1f}%)")
         lines.append(f"  {'TOTAL':12}: {total:8.2f}s")
+    if elapsed is not None:
+        lines.append('')
+        lines.append(f"Elapsed time: {elapsed:.1f}s")
     lines.append('')
 
     # Summary per attack type
     attack_types = ['insertion', 'deletion', 'substitution']
 
+    # Get all unique group counts, sorted
+    all_groups = sorted(results_df['groups'].unique())
+
     lines.append('-' * w)
-    lines.append('RECOVERY RATE BY ATTACK TYPE')
+    lines.append('RECOVERY RATE BY ATTACK TYPE AND GROUP COUNT')
     lines.append('-' * w)
-    lines.append(f"{'Attack Type':<15} {'Baseline':<12} {'Max Groups':<12} {'Drop':<12}")
+
+    # Build header with all group counts
+    header = f"{'Attack Type':<15}"
+    for g in all_groups:
+        if g == 0:
+            header += f"{'Baseline':>10}"
+        else:
+            header += f"{'G=' + str(g):>10}"
+    header += f"{'Drop':>10}"
+    lines.append(header)
 
     for attack_type in attack_types:
         attack_data = results_df[results_df['attack_type'] == attack_type]
 
-        baseline = attack_data[attack_data['groups'] == 0]['recovered'].mean() * 100
-        max_groups = attack_data['groups'].max()
-        max_groups_rate = attack_data[attack_data['groups'] == max_groups]['recovered'].mean() * 100
-        drop = baseline - max_groups_rate
+        row = f"  {attack_type.capitalize():<13}"
+        rates = []
+        for g in all_groups:
+            rate = attack_data[attack_data['groups'] == g]['recovered'].mean() * 100
+            rates.append(rate)
+            row += f"{rate:>9.1f}%"
 
-        lines.append(f"  {attack_type.capitalize():<13} {baseline:>10.1f}% {max_groups_rate:>10.1f}% {drop:>10.1f}%")
+        # Calculate drop from baseline to max groups
+        if len(rates) >= 2:
+            drop = rates[0] - rates[-1]
+            row += f"{drop:>9.1f}%"
+        else:
+            row += f"{'N/A':>10}"
+
+        lines.append(row)
 
     lines.append('')
     lines.append('=' * w)
@@ -833,12 +858,70 @@ def generate_recovery_graph(results_df: pd.DataFrame, output_path: Path,
         # Add baseline annotation
         if 0 in groups:
             baseline_rate = recovery_by_groups[0]
-            ax.axhline(y=baseline_rate, color='green', linestyle='--', alpha=0.5,
-                       label=f'Baseline: {baseline_rate:.1f}%')
-            ax.legend(loc='lower right')
+            ax.axhline(y=baseline_rate, color='green', linestyle='--', alpha=0.5)
+            # Label inside plot, right-aligned
+            ax.text(max(groups), baseline_rate, f'{baseline_rate:.1f}% ',
+                    va='bottom', ha='right', color='green', fontsize=9)
 
         # Set x-axis ticks to integers only
         ax.set_xticks(groups)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved graph: {output_path}")
+
+
+def generate_combined_recovery_graph(results_df: pd.DataFrame, output_path: Path,
+                                     perturbation_pct: int) -> None:
+    """Generate PNG with all attack types on a single plot.
+
+    Args:
+        results_df: DataFrame with simulation results
+        output_path: Path to save the PNG file
+        perturbation_pct: Perturbation rate used (for title)
+    """
+    attack_types = ['insertion', 'deletion', 'substitution']
+    colors = {'insertion': 'tab:blue', 'deletion': 'tab:orange', 'substitution': 'tab:red'}
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.suptitle(f'Watermark Recovery Rate vs Attack Groups (Budget: {perturbation_pct}% of tokens)',
+                 fontsize=14, fontweight='bold')
+
+    baseline_rate = None
+
+    for attack_type in attack_types:
+        attack_data = results_df[results_df['attack_type'] == attack_type]
+
+        # Calculate recovery rate per group count
+        recovery_by_groups = attack_data.groupby('groups')['recovered'].mean() * 100
+        groups = recovery_by_groups.index.tolist()
+        rates = recovery_by_groups.values.tolist()
+
+        # Store baseline (same for all attack types)
+        if baseline_rate is None and 0 in groups:
+            baseline_rate = recovery_by_groups[0]
+
+        # Plot
+        ax.plot(groups, rates, marker='o', linewidth=2, markersize=6,
+                color=colors[attack_type], label=attack_type.capitalize())
+
+    ax.set_xlabel('Number of Attack Groups', fontsize=11)
+    ax.set_ylabel('Recovery Rate (%)', fontsize=11)
+    ax.set_ylim(0, 105)
+    ax.grid(True, alpha=0.3)
+
+    # Add baseline
+    if baseline_rate is not None:
+        ax.axhline(y=baseline_rate, color='green', linestyle='--', alpha=0.5)
+        ax.text(max(groups), baseline_rate, f'{baseline_rate:.1f}% ',
+                va='bottom', ha='right', color='green', fontsize=9)
+
+    # Set x-axis ticks to integers only
+    ax.set_xticks(groups)
+
+    # Legend in bottom left
+    ax.legend(loc='lower left')
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -939,12 +1022,15 @@ def main():
     results_df.to_csv(results_path, index=False)
     print(f"\nSaved results: {results_path}")
 
-    # Generate recovery rate graph
+    # Generate recovery rate graphs
     graph_path = output_dir / "recovery_rate.png"
     generate_recovery_graph(results_df, graph_path, args.perturbation_rate)
 
+    combined_graph_path = output_dir / "recovery_rate_combined.png"
+    generate_combined_recovery_graph(results_df, combined_graph_path, args.perturbation_rate)
+
     # Generate and save summary
-    summary = format_summary_report(results_df, args, groups_list, timing, all_source_dirs)
+    summary = format_summary_report(results_df, args, groups_list, timing, all_source_dirs, elapsed)
     summary_path = output_dir / "attack_summary.txt"
     summary_path.write_text(summary)
     print(f"Saved summary: {summary_path}")
