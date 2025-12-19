@@ -20,8 +20,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import galois
-
 # Add parent directory to path for src imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -256,8 +254,7 @@ class SimulationCache:
 
     def __init__(self):
         self._decoders: Dict[str, LLMWatermarkDecoder] = {}
-        self._galois_gf: Dict[int, object] = {}  # {n: galois.GF(2**n)}
-        self._pm_gf: Dict[int, GaloisField] = {}  # {n: GaloisField(n)}
+        self._gf: Dict[int, GaloisField] = {}  # {n: GaloisField(n)}
         self._mcp_solvers: Dict[int, MCPSolver] = {}  # {n: MCPSolver}
         self.timing = {'gf_mcp': 0.0, 'decoder': 0.0, 'attack': 0.0, 'decode': 0.0, 'mcp': 0.0}
 
@@ -269,21 +266,20 @@ class SimulationCache:
             pct = t / total * 100 if total > 0 else 0
             print(f"  {name:12}: {t:8.2f}s ({pct:5.1f}%)")
 
-    def get_gf(self, n: int) -> Tuple[object, GaloisField]:
-        """Get or create Galois field instances for given n."""
-        if n not in self._galois_gf:
-            self._galois_gf[n] = galois.GF(2 ** n)
-            self._pm_gf[n] = GaloisField(n)
-        return self._galois_gf[n], self._pm_gf[n]
+    def get_gf(self, n: int) -> GaloisField:
+        """Get or create Galois field instance for given n."""
+        if n not in self._gf:
+            self._gf[n] = GaloisField(n)
+        return self._gf[n]
 
     def get_mcp_solver(self, n: int) -> MCPSolver:
         """Get or create MCP solver for given n."""
         if n not in self._mcp_solvers:
-            _, pm_gf = self.get_gf(n)
-            self._mcp_solvers[n] = MCPSolver(gf=pm_gf, n=n, verbose=False)
+            gf = self.get_gf(n)
+            self._mcp_solvers[n] = MCPSolver(gf=gf, n=n, verbose=False)
         return self._mcp_solvers[n]
 
-    def get_decoder(self, model_name: str, secret_key: str, n: int, gf: object,
+    def get_decoder(self, model_name: str, secret_key: str, n: int, gf: GaloisField,
                     hamming_mode: str, correct: bool, green_fraction: float,
                     device: str) -> LLMWatermarkDecoder:
         """Get or create a decoder for the given parameters.
@@ -446,9 +442,9 @@ def run_simulation_for_row(
     green_fraction = config.get('green_fraction', 0.5)
     model_name = config.get('model', 'unknown')
 
-    # Get cached GF instances and MCP solver
+    # Get cached GF instance and MCP solver
     t0 = time.perf_counter()
-    gf, _ = cache.get_gf(n)
+    gf = cache.get_gf(n)
     mcp_solver = cache.get_mcp_solver(n)
     cache.timing['gf_mcp'] += time.perf_counter() - t0
 

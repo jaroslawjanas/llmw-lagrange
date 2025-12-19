@@ -14,29 +14,36 @@ class GaloisField:
     Works directly with integers for maximum compatibility and performance.
     """
     
-    # Common irreducible polynomials for different field sizes
+    # Irreducible polynomials matching the galois package (https://mhostetter.github.io/galois/)
+    # These define the field arithmetic - must be consistent across encoder/decoder
     # Format: n -> polynomial (as integer with bit representation)
     IRREDUCIBLE_POLYNOMIALS = {
-        1: 0x3,      # x + 1
-        2: 0x7,      # x^2 + x + 1
-        3: 0xB,      # x^3 + x + 1
-        4: 0x13,     # x^4 + x + 1
-        5: 0x25,     # x^5 + x^2 + 1
-        6: 0x43,     # x^6 + x + 1
-        7: 0x89,     # x^7 + x^3 + 1
-        8: 0x11D,    # x^8 + x^4 + x^3 + x^2 + 1
-        9: 0x211,    # x^9 + x^4 + 1
-        10: 0x409,   # x^10 + x^3 + 1
-        11: 0x805,   # x^11 + x^2 + 1
-        12: 0x1053,  # x^12 + x^6 + x^4 + x + 1
-        13: 0x201B,  # x^13 + x^4 + x^3 + x + 1
-        14: 0x4443,  # x^14 + x^10 + x^6 + x + 1
-        15: 0x8003,  # x^15 + x + 1
-        16: 0x1002D, # x^16 + x^5 + x^3 + x^2 + 1
-        17: 0x20009, # x^17 + x^3 + 1
-        18: 0x40009, # x^18 + x^3 + 1
-        19: 0x80027, # x^19 + x^5 + x^2 + x + 1
-        20: 0x100009, # x^20 + x^3 + 1
+        1: 0x3,       # x + 1
+        2: 0x7,       # x^2 + x + 1
+        3: 0xB,       # x^3 + x + 1
+        4: 0x13,      # x^4 + x + 1
+        5: 0x25,      # x^5 + x^2 + 1
+        6: 0x5B,      # x^6 + x^4 + x^3 + x + 1
+        7: 0x83,      # x^7 + x + 1
+        8: 0x11D,     # x^8 + x^4 + x^3 + x^2 + 1
+        9: 0x211,     # x^9 + x^4 + 1
+        10: 0x46F,    # x^10 + x^6 + x^5 + x^3 + x^2 + x + 1
+        11: 0x805,    # x^11 + x^2 + 1
+        12: 0x10EB,   # x^12 + x^7 + x^6 + x^5 + x^3 + x + 1
+        13: 0x201B,   # x^13 + x^4 + x^3 + x + 1
+        14: 0x40A9,   # x^14 + x^7 + x^5 + x^3 + 1
+        15: 0x8035,   # x^15 + x^5 + x^4 + x^2 + 1
+        16: 0x1002D,   # x^16 + x^5 + x^3 + x^2 + 1
+        17: 0x20009,   # x^17 + x^3 + 1
+        18: 0x41403,   # x^18 + x^12 + x^10 + x + 1
+        19: 0x80027,   # x^19 + x^5 + x^2 + x + 1
+        20: 0x1006F3,  # x^20 + x^10 + x^9 + x^7 + x^6 + x^5 + x^4 + x + 1
+        21: 0x200065,  # x^21 + x^6 + x^5 + x^2 + 1
+        22: 0x401F61,  # x^22 + x^12 + x^11 + x^10 + x^9 + x^8 + x^6 + x^5 + 1
+        23: 0x800021,  # x^23 + x^5 + 1
+        24: 0x101E6A9, # x^24 + x^16 + x^15 + x^14 + x^13 + x^9 + x^7 + x^5 + x^3 + 1
+        25: 0x2000145, # x^25 + x^8 + x^6 + x^2 + 1
+        26: 0x40045D3, # x^26 + x^14 + x^10 + x^8 + x^7 + x^6 + x^4 + x + 1
     }
     
     def __init__(self, n: int):

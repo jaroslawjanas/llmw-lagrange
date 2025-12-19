@@ -1,5 +1,4 @@
 import argparse
-import galois
 import random
 import numpy as np
 import torch
@@ -89,19 +88,22 @@ def main():
         else:
             print(f"Device: {device} (CUDA not available, falling back to CPU)\n")
         
-    # Create a Galois field of size 2^n
+    # Create a Galois field GF(2^n) using pm_galois (faster, single implementation)
     field_size = 2 ** args.n
-    gf = galois.GF(field_size)
-    
-    # Generate two random numbers in the Galois field
-    a0 = gf.Random(seed=args.seed)
-    a1 = gf.Random(seed=args.seed + 1)
+    gf = GaloisField(args.n)
+
+    # Generate two random coefficients in [0, 2^n - 1]
+    # Use separate Random instances to match the previous galois.GF.Random behavior
+    rng_a0 = random.Random(args.seed)
+    rng_a1 = random.Random(args.seed + 1)
+    a0 = rng_a0.randint(0, field_size - 1)
+    a1 = rng_a1.randint(0, field_size - 1)
     if args.verbose:
         print(f"Generated random numbers in GF(2^{args.n}): a0 = {a0}, a1 = {a1}")
         print(f"K = {a0}|{a1}\n")
-    
-    # Create an anonymous function y = x * a1 + a0
-    line_fnc = lambda x: x * a1 + a0
+
+    # Create line function f(x) = a0 + a1*x in GF(2^n)
+    line_fnc = lambda x, _gf=gf, _a0=a0, _a1=a1: _gf.add(_gf.multiply(int(x), _a1), _a0)
     
     # Generate a deterministic 64-bit secret key based on seed
     secret_key_int = random.getrandbits(64)
@@ -142,11 +144,8 @@ def main():
         c_correction=args.c_correction
     )
 
-    # Create MCP solver
-    # Note: MCPSolver uses pm_galois.GaloisField (has subtract/divide methods),
-    # not galois.GF which is used by encoder/decoder for field arithmetic
-    pm_gf = GaloisField(args.n)
-    mcp_solver = MCPSolver(gf=pm_gf, n=args.n, verbose=args.verbose)
+    # Create MCP solver (uses the same GaloisField instance)
+    mcp_solver = MCPSolver(gf=gf, n=args.n, verbose=args.verbose)
 
     # Get dataset info
     dataset_name = args.dataset[0]
@@ -305,9 +304,9 @@ def main():
             unique_pairs = len(set((b['x'], b['y']) for b in watermark_blocks))
             print(f"\nWatermark blocks info ({unique_pairs}/{len(watermark_blocks)} unique):")
             # Calculate the maximum width needed for x and y values based on n
-            max_gf_value_str_len = len(str(2**args.n - 1))
+            max_value_width = len(str(2**args.n - 1))
             for i, block in enumerate(watermark_blocks):
-                print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
+                print(f"  Block {i+1:<3}: x= {block['x']:>{max_value_width}}, y= {block['y']:>{max_value_width}}, bits= {str(block['y_bits']):<{args.n * 3}}")
             
             # Decoding
             print(f"\n{'-'*60}")
@@ -364,7 +363,7 @@ def main():
                 # Non-Hamming mode: Original output
                 print(f"Decoded {len(all_blocks)} total blocks, {len(valid_blocks)} valid blocks:")
                 for i, block in enumerate(valid_blocks):
-                    print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}, p_bits= {block['p_bits']}")
+                    print(f"  Block {i+1:<3}: x= {block['x']:>{max_value_width}}, y_bits= {str(block['y_bits']):<{args.n * 3}}, p_bits= {block['p_bits']}")
 
                 # Compare encoder vs decoder results (only for non-Hamming fixed-boundary mode)
                 print(f"\nComparison (Watermark vs Encoded vs Decoded):")

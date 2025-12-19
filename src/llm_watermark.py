@@ -73,7 +73,7 @@ class LLMWatermarkerBase(ABC):
         model_name: str,
         secret_key: str,
         n: int,
-        gf: object,
+        gf: GaloisField,
         device: str,
         green_list_fraction: float = 0.5,
         seed: int = 4242,
@@ -133,42 +133,40 @@ class LLMWatermarkerBase(ABC):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
     
-    def _hash_to_gf_element(self, token_id: int, secret_key: str) -> object:
+    def _hash_to_x(self, token_id: int, secret_key: str) -> int:
         """
-        Hash a token ID and secret key to produce a GF(2^n) element.
-        
+        Hash a token ID and secret key to produce an x-coordinate in GF(2^n).
+
         Args:
             token_id: Token ID to hash
             secret_key: Secret key for watermarking
-            
+
         Returns:
-            Element in GF(2^n)
+            Integer in range [0, 2^n - 1]
         """
         # Create hash input by concatenating token ID and secret key
         hash_input = f"{token_id}-{secret_key}"
         hash_object = hashlib.sha256(hash_input.encode())
         hash_bytes = hash_object.digest()
-        
+
         # Take first n bits from the hash
         # Convert bytes to integer, then take modulo 2^n
         hash_int = int.from_bytes(hash_bytes[:4], byteorder='big')  # Use first 4 bytes
         hash_value = hash_int % (2 ** self.n)
-        
-        # Convert to GF(2^n) element
-        return self.gf(hash_value)
+
+        return hash_value
     
-    def _gf_to_binary(self, gf_element: object) -> List[int]:
+    def _int_to_binary(self, value: int) -> List[int]:
         """
-        Convert a GF(2^n) element to its n-bit binary representation.
-        
+        Convert an integer to its n-bit binary representation.
+
         Args:
-            gf_element: Element in GF(2^n)
-            
+            value: Integer in range [0, 2^n - 1]
+
         Returns:
             List of n bits (0s and 1s)
         """
-        # Get the integer representation of the field element
-        int_value = int(gf_element)
+        int_value = int(value)  # Ensure integer type
         
         # Convert to binary and pad to n bits
         binary_str = format(int_value, f'0{self.n}b')
@@ -176,25 +174,24 @@ class LLMWatermarkerBase(ABC):
         # Convert to list of integers
         return [int(bit) for bit in binary_str]
     
-    def _binary_to_gf(self, binary_bits: List[int]) -> object:
+    def _binary_to_int(self, binary_bits: List[int]) -> int:
         """
-        Convert a binary sequence to a GF(2^n) element.
-        
+        Convert a binary sequence to an integer.
+
         Args:
             binary_bits: List of n bits (0s and 1s)
-            
+
         Returns:
-            Element in GF(2^n)
+            Integer in range [0, 2^n - 1]
         """
         if len(binary_bits) != self.n:
             raise ValueError(f"Binary sequence must have exactly {self.n} bits, got {len(binary_bits)}")
-        
+
         # Convert binary list to integer
         binary_str = ''.join(str(bit) for bit in binary_bits)
         int_value = int(binary_str, 2)
-        
-        # Convert to GF(2^n) element
-        return self.gf(int_value)
+
+        return int_value
     
     def _get_red_green_tokens(self, token_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -220,7 +217,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         secret_key: str,
         line_fnc: callable,
         n: int,
-        gf: object,
+        gf: GaloisField,
         device: str,
         green_list_fraction: float = 0.5,
         bias: float = 6.0,
@@ -487,13 +484,13 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 previous_token_id = 0
             
             # Compute x-coordinate for this block
-            x = self._hash_to_gf_element(previous_token_id, self.secret_key)
+            x = self._hash_to_x(previous_token_id, self.secret_key)
             
             # Compute y = f(x) using the line function
             y = self.line_fnc(x)
 
             # Convert y to binary representation
-            y_bits = self._gf_to_binary(y)
+            y_bits = self._int_to_binary(y)
 
             # Apply Hamming encoding if enabled
             if self.hamming:
@@ -621,7 +618,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 # Build encoded block (actual)
                 encoded_y_bits = encoded_bits[:self.n]
                 encoded_p_bits = encoded_bits[self.n:] if self.hamming else []
-                encoded_y = self._binary_to_gf(encoded_y_bits)
+                encoded_y = self._binary_to_int(encoded_y_bits)
                 encoded_block = {
                     'x': int(x),
                     'y': int(encoded_y),
@@ -676,7 +673,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         model_name: str,
         secret_key: str,
         n: int,
-        gf: object,
+        gf: GaloisField,
         device: str,
         green_list_fraction: float = 0.5,
         seed: int = 4242,
@@ -732,8 +729,8 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
 
         Returns:
             Tuple of (all_blocks, valid_blocks, token_count) where each block contains:
-            - 'x': x-coordinate (GF element as integer)
-            - 'y': y-value as GF element converted to integer
+            - 'x': x-coordinate (integer in GF(2^n))
+            - 'y': y-value (integer in GF(2^n))
             - 'y_bits': Data bits (flat list)
             - 'p_bits': Parity bits (empty list for non-Hamming)
         """
@@ -799,7 +796,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
 
             # X-coordinate from token before this block (0 for first block)
             prev_token = 0 if block_start == 0 else token_ids[block_start - 1]
-            x = self._hash_to_gf_element(prev_token, self.secret_key)
+            x = self._hash_to_x(prev_token, self.secret_key)
 
             # Classify each token in block as green (1) or red (0)
             y_bits = []
@@ -811,10 +808,10 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                 is_green = (green_tokens == token_id).any().item()
                 y_bits.append(1 if is_green else 0)
 
-            y_gf = self._binary_to_gf(y_bits)
+            y_val = self._binary_to_int(y_bits)
             blocks.append({
                 'x': int(x),
-                'y': int(y_gf),
+                'y': int(y_val),
                 'y_bits': y_bits,
                 'p_bits': []
             })
@@ -873,12 +870,12 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
 
             # Compute x from token before this window
             prev_token = 0 if start == 0 else token_ids[start - 1]
-            x = self._hash_to_gf_element(prev_token, self.secret_key)
-            y_gf = self._binary_to_gf(data_bits)
+            x = self._hash_to_x(prev_token, self.secret_key)
+            y_val = self._binary_to_int(data_bits)
 
             block = {
                 'x': int(x),
-                'y': int(y_gf),
+                'y': int(y_val),
                 'y_bits': data_bits,
                 'p_bits': p_bits
             }
@@ -950,10 +947,10 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             variations = self._generate_bit_variations(block['y_bits'], self.c_correction)
 
             for var_bits in variations[1:]:  # Skip index 0 (original)
-                y_gf = self._binary_to_gf(var_bits)
+                y_val = self._binary_to_int(var_bits)
                 all_blocks.append({
                     'x': block['x'],
-                    'y': int(y_gf),
+                    'y': int(y_val),
                     'y_bits': var_bits,
                     'p_bits': []
                 })
@@ -974,12 +971,12 @@ class MCPSolver:
     setup we simply modified this function to use a faster (Pawel's) implementation.
     """
     
-    def __init__(self, gf: object, n: int, verbose: bool = False):
+    def __init__(self, gf: GaloisField, n: int, verbose: bool = False):
         """
         Initialize the MCP solver.
-        
+
         Args:
-            gf: Galois field instance GF(2^n)
+            gf: GaloisField instance for GF(2^n) arithmetic
             n: Field size parameter
             verbose: Whether to show detailed output
         """
@@ -1029,14 +1026,14 @@ class MCPSolver:
         
         return a0, a1
     
-    def verify_watermark(self, decoded_blocks: List[Dict], original_a0: object, original_a1: object, watermark_blocks: List[Dict] = None) -> Dict:
+    def verify_watermark(self, decoded_blocks: List[Dict], original_a0: int, original_a1: int, watermark_blocks: List[Dict] = None) -> Dict:
         """
         Complete watermark verification pipeline.
 
         Args:
             decoded_blocks: List of decoded blocks (typically valid_blocks from decoder)
-            original_a0: Original a0 coefficient (GF element)
-            original_a1: Original a1 coefficient (GF element)
+            original_a0: Original a0 coefficient (integer in GF(2^n))
+            original_a1: Original a1 coefficient (integer in GF(2^n))
             watermark_blocks: Optional list of original watermark blocks for matching
 
         Returns:
