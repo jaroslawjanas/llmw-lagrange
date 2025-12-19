@@ -789,7 +789,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         num_blocks = len(token_ids) // self.n
 
         if num_blocks <= 1:
-            return [], [], 0
+            return [], [], len(token_ids)
 
         blocks = []
         progress_bar = tqdm(range(num_blocks), desc="Decoding Blocks", disable=not self.verbose)
