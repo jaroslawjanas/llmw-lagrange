@@ -58,9 +58,9 @@ def calculate_stats(df):
     block_cols = {
         'valid_blocks': '_valid_blocks_count',
         'matching_blocks': '_matching_blocks_count',
-        'unique_watermark': 'unique_watermark_blocks',
-        'unique_valid': 'unique_valid_blocks',
-        'unique_matching': 'unique_matching_blocks',
+        'unique_watermark': 'unique_watermark_blocks_count',
+        'unique_valid': 'unique_valid_blocks_count',
+        'unique_matching': 'unique_matching_blocks_count',
     }
 
     for name, col in block_cols.items():
@@ -94,12 +94,12 @@ def create_box_plots(df, output_path, model_name):
     Create 3x4 box plot figure.
 
     Rows: All, Recovered, Not Recovered
-    Cols: unique_watermark_blocks, unique_valid_blocks, unique_matching_blocks, properly_encoded_tokens
+    Cols: unique_watermark_blocks_count, unique_valid_blocks_count, unique_matching_blocks_count, properly_encoded_tokens
     """
     fig, axes = plt.subplots(3, 4, figsize=(14, 10))
 
-    columns = ['unique_watermark_blocks', 'unique_valid_blocks',
-               'unique_matching_blocks', 'properly_encoded_tokens']
+    columns = ['unique_watermark_blocks_count', 'unique_valid_blocks_count',
+               'unique_matching_blocks_count', 'properly_encoded_tokens']
     col_labels = ['Unique Watermark\nBlocks', 'Unique Valid\nBlocks',
                   'Unique Matching\nBlocks', 'Properly Encoded\nTokens']
     row_labels = ['All', 'Recovered', 'Not Recovered']

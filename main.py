@@ -195,8 +195,8 @@ def main():
     columns = [
         'field_size', 'prompt', 'generated_text', 'generated_ids', 'tokens_length',
         'a0', 'a1', 'recovered_a0', 'recovered_a1', 'secret_key',
-        'watermark_blocks', 'decoded_blocks', 'valid_blocks', 'matching_blocks',
-        'unique_watermark_blocks', 'unique_valid_blocks', 'unique_matching_blocks',
+        'watermark_blocks', 'encoded_blocks', 'decoded_blocks', 'valid_blocks', 'matching_blocks',
+        'unique_watermark_blocks_count', 'unique_valid_blocks_count', 'unique_matching_blocks_count',
         'properly_encoded_tokens', 'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
     ]
 
@@ -212,13 +212,14 @@ def main():
         'recovered_a0': 'Int64',       # Nullable integer for None values
         'recovered_a1': 'Int64',       # Nullable integer for None values
         'secret_key': 'string',
-        'watermark_blocks': 'string',  # JSON string
+        'watermark_blocks': 'string',  # JSON string (intended watermark)
+        'encoded_blocks': 'string',    # JSON string (actually encoded)
         'decoded_blocks': 'string',    # JSON string (all blocks)
         'valid_blocks': 'string',      # JSON string (valid blocks only)
         'matching_blocks': 'string',   # JSON string (blocks matching watermark)
-        'unique_watermark_blocks': 'int64',
-        'unique_valid_blocks': 'int64',
-        'unique_matching_blocks': 'int64',
+        'unique_watermark_blocks_count': 'int64',
+        'unique_valid_blocks_count': 'int64',
+        'unique_matching_blocks_count': 'int64',
         'properly_encoded_tokens': 'int64',
         'watermark_recovered': 'boolean',
         'encoding_time': 'float64',
@@ -244,7 +245,7 @@ def main():
 
         # Time encoding
         encoding_start = time.time()
-        full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks_info = watermarker.generate_text(
+        full_text, generated_text, generated_ids, formatted_prompt, generation_statistics, watermark_blocks, encoded_blocks = watermarker.generate_text(
             prompt=prompt,
             max_new_tokens=args.max_tokens,
             verbose=args.verbose
@@ -266,11 +267,11 @@ def main():
             print(f"  Blocks encoded: {generation_statistics['blocks_encoded']}")
 
             # Count unique (x, y) pairs
-            unique_pairs = len(set((b['x'], b['y']) for b in watermark_blocks_info))
-            print(f"\nWatermark blocks info ({unique_pairs}/{len(watermark_blocks_info)} unique):")
+            unique_pairs = len(set((b['x'], b['y']) for b in watermark_blocks))
+            print(f"\nWatermark blocks info ({unique_pairs}/{len(watermark_blocks)} unique):")
             # Calculate the maximum width needed for x and y values based on n
             max_gf_value_str_len = len(str(2**args.n - 1))
-            for i, block in enumerate(watermark_blocks_info):
+            for i, block in enumerate(watermark_blocks):
                 print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y= {block['y']:>{max_gf_value_str_len}}, bits= {str(block['y_bits']):<{args.n * 3}}")
             
             # Decoding
@@ -314,7 +315,7 @@ def main():
                 recovered_pairs = set()  # Track unique (x, y) pairs recovered
                 decoded_y_map = {b['y']: b for b in valid_blocks}
 
-                for i, wm in enumerate(watermark_blocks_info, 1):
+                for i, wm in enumerate(watermark_blocks, 1):
                     wm_coord = f"({wm['x']}, {wm['y']})"
                     if wm['y'] in decoded_y_map:
                         dec = decoded_y_map[wm['y']]
@@ -331,9 +332,9 @@ def main():
                     print(f"  {i:>3}  {wm_coord:<17}  {dec_coord:<17}  {status}")
 
                 noise = len(valid_blocks) - recovered
-                recovery_pct = 100 * recovered / len(watermark_blocks_info) if watermark_blocks_info else 0
+                recovery_pct = 100 * recovered / len(watermark_blocks) if watermark_blocks else 0
                 unique_recovered = len(recovered_pairs)
-                print(f"\n  Recovery: {recovered}/{len(watermark_blocks_info)} ({recovery_pct:.1f}%), {unique_recovered} unique")
+                print(f"\n  Recovery: {recovered}/{len(watermark_blocks)} ({recovery_pct:.1f}%), {unique_recovered} unique")
                 print(f"  Noise: {noise} extra valid blocks")
             else:
                 # Non-Hamming mode: Original output
@@ -346,20 +347,21 @@ def main():
                 print(f"{'Block':<6} {'Enc X':<6} {'Dec X':<6} {'Watermark Bits':<{args.n * 3 + 2}} {'Encoder Bits':<{args.n * 3 + 2}} {'Decoder Bits':<{args.n * 3 + 2}} {'X / Decoding / Watermark'}")
                 print("-" * (18 + args.n * 3 + 2 + args.n * 3 + 2 + args.n * 3 + 35))
 
-                for i in range(min(len(watermark_blocks_info), len(valid_blocks))):
-                    enc_block = watermark_blocks_info[i]
+                for i in range(min(len(watermark_blocks), len(valid_blocks))):
+                    wm_block = watermark_blocks[i]
+                    enc_block = encoded_blocks[i]
                     dec_block = valid_blocks[i]
 
                     # Check if X coordinates match
-                    x_match = "Y" if enc_block['x'] == dec_block['x'] else "N"
+                    x_match = "Y" if wm_block['x'] == dec_block['x'] else "N"
 
                     # Check if encoded bits match decoded bits (encoding/decoding consistency)
-                    decoding_match = "Y" if enc_block['encoded_bits'] == dec_block['y_bits'] else "N"
+                    decoding_match = "Y" if enc_block['y_bits'] == dec_block['y_bits'] else "N"
 
                     # Check if watermark bits match decoded bits (watermark recovery success)
-                    watermark_match = "Y" if enc_block['y_bits'] == dec_block['y_bits'] else "N"
+                    watermark_match = "Y" if wm_block['y_bits'] == dec_block['y_bits'] else "N"
 
-                    print(f"{i+1:<6} {enc_block['x']:<6} {dec_block['x']:<6} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['encoded_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits']):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match}")
+                    print(f"{i+1:<6} {wm_block['x']:<6} {dec_block['x']:<6} {str(wm_block['y_bits']):<{args.n * 3 + 2}} {str(enc_block['y_bits']):<{args.n * 3 + 2}} {str(dec_block['y_bits']):<{args.n * 3 + 2}} {x_match:<4} {decoding_match:<10} {watermark_match}")
             
             # MCP Verification
             print(f"\n{'-'*60}")
@@ -374,7 +376,7 @@ def main():
 
         # Time MCP verification (use valid_blocks for verification)
         mcp_start = time.time()
-        verification_result = mcp_solver.verify_watermark(valid_blocks, a0, a1, watermark_blocks_info)
+        verification_result = mcp_solver.verify_watermark(valid_blocks, a0, a1, watermark_blocks)
         mcp_time = time.time() - mcp_start
         
         if args.verbose:
@@ -407,13 +409,14 @@ def main():
         stats_df.loc[prompt_idx, 'recovered_a0'] = int(verification_result['recovered_a0']) if verification_result['recovered_a0'] is not None else None
         stats_df.loc[prompt_idx, 'recovered_a1'] = int(verification_result['recovered_a1']) if verification_result['recovered_a1'] is not None else None
         stats_df.loc[prompt_idx, 'secret_key'] = secret_key
-        stats_df.loc[prompt_idx, 'watermark_blocks'] = json.dumps(watermark_blocks_info)
+        stats_df.loc[prompt_idx, 'watermark_blocks'] = json.dumps(watermark_blocks)
+        stats_df.loc[prompt_idx, 'encoded_blocks'] = json.dumps(encoded_blocks)
         stats_df.loc[prompt_idx, 'decoded_blocks'] = json.dumps(all_blocks)
         stats_df.loc[prompt_idx, 'valid_blocks'] = json.dumps(valid_blocks)
         stats_df.loc[prompt_idx, 'matching_blocks'] = json.dumps(verification_result['matching_blocks'])
-        stats_df.loc[prompt_idx, 'unique_watermark_blocks'] = len(set((b['x'], b['y']) for b in watermark_blocks_info))
-        stats_df.loc[prompt_idx, 'unique_valid_blocks'] = len(set((b['x'], b['y']) for b in valid_blocks))
-        stats_df.loc[prompt_idx, 'unique_matching_blocks'] = len(set((b['x'], b['y']) for b in verification_result['matching_blocks']))
+        stats_df.loc[prompt_idx, 'unique_watermark_blocks_count'] = len(set((b['x'], b['y']) for b in watermark_blocks))
+        stats_df.loc[prompt_idx, 'unique_valid_blocks_count'] = len(set((b['x'], b['y']) for b in valid_blocks))
+        stats_df.loc[prompt_idx, 'unique_matching_blocks_count'] = len(set((b['x'], b['y']) for b in verification_result['matching_blocks']))
         stats_df.loc[prompt_idx, 'properly_encoded_tokens'] = generation_statistics['properly_encoded_tokens']
         stats_df.loc[prompt_idx, 'watermark_recovered'] = verification_result['is_valid']
         stats_df.loc[prompt_idx, 'encoding_time'] = encoding_time

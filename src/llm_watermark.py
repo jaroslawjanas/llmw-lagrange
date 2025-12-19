@@ -421,17 +421,19 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         prompt: str, 
         max_new_tokens: int = 100, 
         verbose: bool = True
-    ) -> Tuple[str, str, List[int], str, Dict[str, int], List[int]]:
+    ) -> Tuple[str, str, List[int], str, Dict[str, int], List[Dict], List[Dict]]:
         """
         Generate text with Lagrange interpolation watermarking.
-        
+
         Args:
             prompt: Input text prompt
             max_new_tokens: Maximum number of tokens to generate
             verbose: Whether to show progress bar
-            
+
         Returns:
-            Tuple of (full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info)
+            Tuple of (full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks, encoded_blocks)
+            - watermark_blocks: List of intended watermark blocks {x, y, y_bits, p_bits}
+            - encoded_blocks: List of actually encoded blocks {x, y, y_bits, p_bits}
         """
 
         # Reset counters
@@ -441,7 +443,8 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
         self.properly_encoded_tokens = 0
 
         # Initialize tracking for watermark blocks
-        watermark_blocks_info = []
+        watermark_blocks = []
+        encoded_blocks = []
         
         # Format the prompt for the specific model
         formatted_prompt = format_prompt_for_model(prompt, self.model_name, self.tokenizer, verbose=self.verbose)
@@ -498,16 +501,8 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 block_bits = y_bits
                 p_bits = []
 
-            # Track this block
-            block_info = {
-                "block_idx": block_idx,
-                "x": int(x),
-                "y": int(y),
-                "y_bits": y_bits.copy(),
-                "hamming_bits": block_bits.copy() if self.hamming else None,
-                "encoded_bits": [],
-                "tokens": []
-            }
+            # Track encoded bits for this block
+            encoded_bits = []
 
             # Generate tokens for this block (one for each bit)
             for bit_idx in range(self.tokens_per_block):
@@ -589,10 +584,10 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                     encoded_bit = 1 if is_green else 0
                     
                     if is_green:
-                        block_info["encoded_bits"].append(1)
+                        encoded_bits.append(1)
                         self.green_tokens_selected += 1
                     else:
-                        block_info["encoded_bits"].append(0)
+                        encoded_bits.append(0)
                         self.red_tokens_selected += 1
                     
                     # Check if token was properly encoded (intended bit matches actual encoded bit)
@@ -601,7 +596,6 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
 
                 # Add the new token to generated ids
                 all_ids.append(next_token_id)
-                block_info['tokens'].append(next_token_id)
                 tokens_generated += 1
                 
                 # Update progress bar with stats
@@ -612,8 +606,27 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 if next_token_id == self.tokenizer.eos_token_id:
                     break
             
-            # Add completed block info
-            watermark_blocks_info.append(block_info)
+            # Build watermark block (intended)
+            watermark_block = {
+                'x': int(x),
+                'y': int(y),
+                'y_bits': y_bits.copy(),
+                'p_bits': list(p_bits) if self.hamming else []
+            }
+            watermark_blocks.append(watermark_block)
+
+            # Build encoded block (actual)
+            encoded_y_bits = encoded_bits[:self.n]
+            encoded_p_bits = encoded_bits[self.n:] if self.hamming else []
+            encoded_y = self._binary_to_gf(encoded_y_bits)
+            encoded_block = {
+                'x': int(x),
+                'y': int(encoded_y),
+                'y_bits': encoded_y_bits,
+                'p_bits': encoded_p_bits
+            }
+            encoded_blocks.append(encoded_block)
+
             self.blocks_encoded += 1
             
             # Check if we hit EOS in the middle of a block
@@ -646,7 +659,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             'properly_encoded_tokens': self.properly_encoded_tokens
         }
 
-        return full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks_info
+        return full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks, encoded_blocks
 
 
 class LLMWatermarkDecoder(LLMWatermarkerBase):

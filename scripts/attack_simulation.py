@@ -473,8 +473,8 @@ def run_simulation_for_row(
 
     # Baseline (groups=0): Use original stats from data (no attack)
     baseline_recovered = bool(row['watermark_recovered'])
-    baseline_valid = int(row.get('unique_valid_blocks', 0))
-    baseline_matching = int(row.get('unique_matching_blocks', 0))
+    baseline_valid = int(row.get('unique_valid_blocks_count', 0))
+    baseline_matching = int(row.get('unique_matching_blocks_count', 0))
 
     attack_types = ['insertion', 'deletion', 'substitution']
 
