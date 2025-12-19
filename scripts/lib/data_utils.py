@@ -5,8 +5,11 @@ Provides unified data loading, conflict checking, and filtering functions
 shared between analyze.py and attack_simulation.py.
 """
 import sys
-import pandas as pd
+from pathlib import Path
 from typing import Dict, List, Any, Optional
+
+import pandas as pd
+
 from .loader import ExperimentLoader
 
 # Parameters that should be consistent within a model group
@@ -69,6 +72,7 @@ def apply_min_tokens_filter(df: pd.DataFrame, min_tokens: Optional[int]) -> pd.D
 def load_and_prepare_experiments(
     min_tokens: Optional[int] = None,
     force: bool = False,
+    input_dir: Optional[str] = None,
     verbose: bool = True
 ) -> Dict[str, Dict[str, Any]]:
     """
@@ -83,6 +87,9 @@ def load_and_prepare_experiments(
     Args:
         min_tokens: Global min tokens threshold, or None to use per-experiment max_tokens
         force: If True, proceed despite conflicting parameters
+        input_dir: Input directory - can be a single experiment folder or parent of multiple.
+                   If a single experiment (contains statistics.parquet), uses its parent as base.
+                   Default: auto-discover from output/
         verbose: If True, print progress information
 
     Returns:
@@ -96,9 +103,27 @@ def load_and_prepare_experiments(
     Raises:
         SystemExit: If no experiments found or conflicts detected without --force
     """
-    # Load ALL experiments
-    loader = ExperimentLoader()
+    # Determine the output directory for the loader
+    loader_dir = None
+    single_experiment = None
+    if input_dir is not None:
+        input_path = Path(input_dir)
+        # Check if input_dir is a single experiment (has statistics.parquet)
+        if (input_path / "statistics.parquet").exists():
+            # Single experiment - use parent as base, loader will find it
+            loader_dir = input_path.parent
+            single_experiment = input_path.name
+        else:
+            # Assume it's a parent directory containing experiments
+            loader_dir = input_path
+
+    # Load experiments
+    loader = ExperimentLoader(output_dir=loader_dir)
     experiments = loader.load_all()
+
+    # If single experiment specified, filter to just that one
+    if single_experiment:
+        experiments = [e for e in experiments if e.source_dir == single_experiment]
 
     if not experiments:
         print("No experiments found.")

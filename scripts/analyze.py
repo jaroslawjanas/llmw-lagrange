@@ -22,10 +22,13 @@ Examples:
   python analyze.py                     # Use per-experiment max_tokens as threshold
   python analyze.py --min-tokens 200    # Global threshold of 200 tokens
   python analyze.py --force             # Proceed despite conflicting parameters
+  python analyze.py --input-dir output/my_experiment  # Analyze specific experiment
         """
     )
     parser.add_argument("--min-tokens", type=int, default=None,
                         help="Min tokens filter. Default: use each experiment's max_tokens")
+    parser.add_argument("--input-dir", type=str, default=None,
+                        help="Input directory containing experiment(s). Can be a single experiment folder or parent of multiple. Default: auto-discover from output/")
     parser.add_argument("--output-dir", type=str, default="output/analysis",
                         help="Output directory for results (default: output/analysis)")
     parser.add_argument("--force", action="store_true",
@@ -224,6 +227,7 @@ def main():
     prepared_data = load_and_prepare_experiments(
         min_tokens=args.min_tokens,
         force=args.force,
+        input_dir=args.input_dir,
         verbose=True
     )
 

@@ -12,7 +12,6 @@ import src.paths as paths
 from src.utils import get_shuffled_essays
 from src.llm_watermark import LLMWatermarkEncoder, LLMWatermarkDecoder, MCPSolver
 from src.pm_galois import GaloisField
-from tqdm import tqdm
 
 
 def main():
@@ -128,6 +127,27 @@ def main():
         verbose=args.verbose
     )
 
+    # Create decoder instance
+    decoder = LLMWatermarkDecoder(
+        model_name=args.model,
+        secret_key=secret_key,
+        n=args.n,
+        gf=gf,
+        green_list_fraction=args.green_fraction,
+        seed=args.seed,
+        device=device,
+        verbose=args.verbose,
+        hamming_mode=args.hamming,
+        correct=args.correct,
+        c_correction=args.c_correction
+    )
+
+    # Create MCP solver
+    # Note: MCPSolver uses pm_galois.GaloisField (has subtract/divide methods),
+    # not galois.GF which is used by encoder/decoder for field arithmetic
+    pm_gf = GaloisField(args.n)
+    mcp_solver = MCPSolver(gf=pm_gf, n=args.n, verbose=args.verbose)
+
     # Get dataset info
     dataset_name = args.dataset[0]
     dataset_subset = args.dataset[1]
@@ -161,7 +181,8 @@ def main():
     total_prompts = len(prompts)
     if args.verbose:
         print(f"Generating {args.max_tokens} tokens per prompt with watermarking...")
-        print(f"Using dataset: {dataset_name}")
+        if not args.prompt:
+            print(f"Using dataset: {dataset_name}")
         print(f"Processing {total_prompts} prompt(s) with model: {args.model}")
         if args.hamming != "none":
             print(f"Hamming mode: {args.hamming}")
@@ -243,7 +264,7 @@ def main():
     
     stats_df = pd.DataFrame(index=range(total_prompts), columns=columns)
 
-    for prompt_idx, prompt in enumerate(prompts, 0):
+    for prompt_idx, prompt in enumerate(prompts):
         if total_prompts > 1:
             print(f"\n{'='*60}")
             print(f"Processing Prompt {prompt_idx+1}/{total_prompts}")
@@ -277,7 +298,7 @@ def main():
             print(f"  Total tokens: {generation_statistics['total_tokens_generated']}")
             print(f"  Green tokens: {generation_statistics['green_tokens']}")
             print(f"  Red tokens: {generation_statistics['red_tokens']}")
-            print(f"  Greeen ratio: {generation_statistics['green_ratio']}")
+            print(f"  Green ratio: {generation_statistics['green_ratio']}")
             print(f"  Blocks encoded: {generation_statistics['blocks_encoded']}")
 
             # Count unique (x, y) pairs
@@ -292,22 +313,7 @@ def main():
             print(f"\n{'-'*60}")
             print("Decoding")
             print(f"{'-'*60}")
-        
-        # Create decoder with same parameters
-        decoder = LLMWatermarkDecoder(
-            model_name=args.model,
-            secret_key=secret_key,
-            n=args.n,
-            gf=gf,
-            green_list_fraction=args.green_fraction,
-            seed=args.seed,
-            device=device,
-            verbose=args.verbose,
-            hamming_mode=args.hamming,
-            correct=args.correct,
-            c_correction=args.c_correction
-        )
-        
+
         # Time decoding
         decoding_start = time.time()
         if args.force_tokenization:
@@ -385,12 +391,6 @@ def main():
             print(f"\n{'-'*60}")
             print("MCP Watermark Verification")
             print(f"{'-'*60}")
-        
-        # Create MCP solver
-        # Note: MCPSolver uses pm_galois.GaloisField (has subtract/divide methods),
-        # not galois.GF which is used by encoder/decoder for field arithmetic
-        pm_gf = GaloisField(args.n)
-        mcp_solver = MCPSolver(gf=pm_gf, n=args.n, verbose=args.verbose)
 
         # Time MCP verification (use valid_blocks for verification)
         mcp_start = time.time()

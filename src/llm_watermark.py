@@ -606,30 +606,32 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
                 # Check if we've reached an EOS token
                 if next_token_id == self.tokenizer.eos_token_id:
                     break
-            
-            # Build watermark block (intended)
-            watermark_block = {
-                'x': int(x),
-                'y': int(y),
-                'y_bits': y_bits.copy(),
-                'p_bits': list(p_bits) if self.hamming else []
-            }
-            watermark_blocks.append(watermark_block)
 
-            # Build encoded block (actual)
-            encoded_y_bits = encoded_bits[:self.n]
-            encoded_p_bits = encoded_bits[self.n:] if self.hamming else []
-            encoded_y = self._binary_to_gf(encoded_y_bits)
-            encoded_block = {
-                'x': int(x),
-                'y': int(encoded_y),
-                'y_bits': encoded_y_bits,
-                'p_bits': encoded_p_bits
-            }
-            encoded_blocks.append(encoded_block)
+            # Only build blocks if we completed all bits (didn't hit EOS mid-block)
+            if len(encoded_bits) == self.tokens_per_block:
+                # Build watermark block (intended)
+                watermark_block = {
+                    'x': int(x),
+                    'y': int(y),
+                    'y_bits': y_bits.copy(),
+                    'p_bits': list(p_bits) if self.hamming else []
+                }
+                watermark_blocks.append(watermark_block)
 
-            self.blocks_encoded += 1
-            
+                # Build encoded block (actual)
+                encoded_y_bits = encoded_bits[:self.n]
+                encoded_p_bits = encoded_bits[self.n:] if self.hamming else []
+                encoded_y = self._binary_to_gf(encoded_y_bits)
+                encoded_block = {
+                    'x': int(x),
+                    'y': int(encoded_y),
+                    'y_bits': encoded_y_bits,
+                    'p_bits': encoded_p_bits
+                }
+                encoded_blocks.append(encoded_block)
+
+                self.blocks_encoded += 1
+
             # Check if we hit EOS in the middle of a block
             if all_ids[-1] == self.tokenizer.eos_token_id:
                 break
