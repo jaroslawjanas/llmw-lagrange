@@ -11,6 +11,7 @@ import random
 import torch
 import numpy as np
 import time
+from itertools import combinations
 from typing import List, Tuple, Dict, Optional, Union
 from abc import ABC, abstractmethod
 from functools import lru_cache
@@ -681,6 +682,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         verbose: bool = False,
         hamming_mode: str = "none",
         correct: bool = False,
+        c_correction: int = 0,
     ):
         """
         Initialize the decoder with the same parameters used for encoding.
@@ -697,6 +699,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             verbose: Whether to show detailed output
             hamming_mode: Hamming code mode ("none", "standard", "secded")
             correct: Whether to enable Hamming error correction (False = detection-only)
+            c_correction: Max Hamming distance for variation generation (0 = disabled)
         """
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, device, green_list_fraction, seed, cache_dir, verbose)
@@ -704,6 +707,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         # Hamming code setup
         self.hamming_mode = hamming_mode
         self.correct = correct
+        self.c_correction = c_correction
         if hamming_mode != "none":
             self.hamming = HammingCode(n, secded=(hamming_mode == "secded"))
         else:
@@ -742,6 +746,11 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         # Dispatch to appropriate decoder
         if self.hamming:
             return self._decode_sliding_blocks(token_ids)
+        elif self.c_correction > 0:
+            # Decode fixed blocks, then apply c-correction variations
+            all_blocks, _, token_count = self._decode_fixed_blocks(token_ids)
+            expanded_blocks = self._apply_c_correction(all_blocks)
+            return expanded_blocks, expanded_blocks, token_count
         else:
             return self._decode_fixed_blocks(token_ids)
 
@@ -888,6 +897,69 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             print(f"Found {valid_count} valid windows, {invalid_count} invalid windows")
 
         return all_blocks, valid_blocks, decoded_tokens_length
+
+    def _generate_bit_variations(self, bits: List[int], max_distance: int) -> List[List[int]]:
+        """
+        Generate all bit-flip variations of a bit sequence up to a given Hamming distance.
+
+        Args:
+            bits: Original bit sequence
+            max_distance: Maximum number of bits to flip (e.g., 1 or 2)
+
+        Returns:
+            List of all variations including the original
+        """
+        n = len(bits)
+        variations = [bits.copy()]  # Include original
+
+        # Generate all combinations of positions to flip for each distance
+        for distance in range(1, max_distance + 1):
+            for positions in combinations(range(n), distance):
+                variant = bits.copy()
+                for pos in positions:
+                    variant[pos] ^= 1  # Flip the bit
+                variations.append(variant)
+
+        return variations
+
+    def _apply_c_correction(self, blocks: List[Dict]) -> List[Dict]:
+        """
+        Apply c-correction by generating all bit-flip variations for each block.
+
+        Args:
+            blocks: List of decoded blocks from _decode_fixed_blocks
+
+        Returns:
+            List: [orig_1, orig_2, ..., orig_k, corr_1_1, corr_1_2, ..., corr_2_1, ...]
+        """
+        all_blocks = []
+
+        # First: add all original blocks
+        for block in blocks:
+            all_blocks.append({
+                'x': block['x'],
+                'y': block['y'],
+                'y_bits': block['y_bits'].copy(),
+                'p_bits': []
+            })
+
+        # Second: add all corrections
+        for block in blocks:
+            variations = self._generate_bit_variations(block['y_bits'], self.c_correction)
+
+            for var_bits in variations[1:]:  # Skip index 0 (original)
+                y_gf = self._binary_to_gf(var_bits)
+                all_blocks.append({
+                    'x': block['x'],
+                    'y': int(y_gf),
+                    'y_bits': var_bits,
+                    'p_bits': []
+                })
+
+        if self.verbose:
+            print(f"Generated {len(all_blocks)} blocks from {len(blocks)} original blocks (c={self.c_correction})")
+
+        return all_blocks
 
 
 class MCPSolver:

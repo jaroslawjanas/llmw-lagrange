@@ -39,6 +39,8 @@ def main():
                         help="Hamming code mode: 'none' (default), 'standard' (correct 1-bit errors), 'secded' (correct 1-bit, detect 2-bit errors)")
     parser.add_argument("--correct", action="store_true", default=False,
                         help="Enable Hamming error correction (default: detection-only for better filtering)")
+    parser.add_argument("--c-correction", type=int, default=0,
+                        help="Enable c-correction mode: generate all bit-flip variations up to this Hamming distance (e.g., 1 or 2). Incompatible with --hamming and --correct.")
 
     args = parser.parse_args()
 
@@ -54,6 +56,17 @@ def main():
         except ValueError:
             print(f"ERROR: --n-prompts must be a positive integer or 'all', got: {args.n_prompts}")
             return 1
+
+    # Validate c-correction incompatibility with hamming and correct
+    if args.c_correction > 0:
+        if args.hamming != "none":
+            print(f"ERROR: --c-correction is incompatible with --hamming {args.hamming}. Use --hamming none (default) with --c-correction.")
+            return 1
+        if args.correct:
+            print(f"ERROR: --c-correction is incompatible with --correct.")
+            return 1
+        if args.c_correction > 2:
+            print(f"WARNING: --c-correction > 2 is not recommended. High values generate many variations, making MCP calculation slower and more prone to errors.")
 
     # Set global cache
     paths.set_cache_dir(args.cache_dir)
@@ -181,6 +194,7 @@ def main():
         'force_tokenization': args.force_tokenization,
         'hamming': args.hamming,
         'correct': args.correct,
+        'c_correction': args.c_correction,
         'timestamp': timestamp,
         'output_dir': output_subdir
     }
@@ -290,7 +304,8 @@ def main():
             device=device,
             verbose=args.verbose,
             hamming_mode=args.hamming,
-            correct=args.correct
+            correct=args.correct,
+            c_correction=args.c_correction
         )
         
         # Time decoding
@@ -302,10 +317,13 @@ def main():
         decoding_time = time.time() - decoding_start
         
         if args.verbose:
-            if args.hamming != "none":
-                # Hamming mode: Show sliding window stats and recovery table
-                correction_mode = "on" if args.correct else "off"
-                print(f"Sliding window: {len(all_blocks)} scanned, {len(valid_blocks)} valid, {len(all_blocks) - len(valid_blocks)} invalid (correction={correction_mode})")
+            if args.hamming != "none" or args.c_correction > 0:
+                # Hamming/c-correction mode: Show recovery table with y-value matching
+                if args.hamming != "none":
+                    correction_mode = "on" if args.correct else "off"
+                    print(f"Sliding window: {len(all_blocks)} scanned, {len(valid_blocks)} valid, {len(all_blocks) - len(valid_blocks)} invalid (correction={correction_mode})")
+                else:
+                    print(f"C-correction: {len(valid_blocks)} blocks ({len(valid_blocks) // (1 + args.n)} original, expanded with c={args.c_correction})")
 
                 print(f"\nWatermark Recovery:")
                 print(f"  {'#':>3}  {'Encoded (x, y)':<17}  {'Decoded (x, y)':<17}  Status")
@@ -399,6 +417,12 @@ def main():
             print(f"Watermark Verification: {status} (Collinear points: {verification_result['max_collinear_count']}/{verification_result['total_points']}, Matching: {matching_count})")
 
         # Collect statistics for this prompt run
+        # Block types:
+        # - watermark_blocks: the (x, y) points we intended to encode (on the secret line)
+        # - encoded_blocks: the (x, y) points actually encoded (may differ due to biasing limitations)
+        # - decoded_blocks (all_blocks): blocks recovered through decoding (includes c-correction variations)
+        # - valid_blocks: for --hamming: Hamming-valid blocks only; otherwise same as decoded_blocks
+        # - matching_blocks: valid_blocks whose y-value matches any watermark_block's y-value
         stats_df.loc[prompt_idx, 'field_size'] = 2 ** args.n
         stats_df.loc[prompt_idx, 'prompt'] = prompt
         stats_df.loc[prompt_idx, 'generated_text'] = generated_text
