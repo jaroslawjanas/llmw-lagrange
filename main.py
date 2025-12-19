@@ -339,7 +339,7 @@ def main():
                 # Non-Hamming mode: Original output
                 print(f"Decoded {len(all_blocks)} total blocks, {len(valid_blocks)} valid blocks:")
                 for i, block in enumerate(valid_blocks):
-                    print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}, c_bits= {block['c_bits']}")
+                    print(f"  Block {i+1:<3}: x= {block['x']:>{max_gf_value_str_len}}, y_bits= {str(block['y_bits']):<{args.n * 3}}, p_bits= {block['p_bits']}")
 
                 # Compare encoder vs decoder results (only for non-Hamming fixed-boundary mode)
                 print(f"\nComparison (Watermark vs Encoded vs Decoded):")

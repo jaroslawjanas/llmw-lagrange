@@ -5,13 +5,15 @@ Supports:
 - Standard Hamming (d_min=3): Correct 1-bit errors
 - SECDED (d_min=4): Correct 1-bit errors, detect 2-bit errors
 
+Uses SYSTEMATIC format: codeword = [data_bits | parity_bits]
+
 Usage:
     # Initialize once for a given block size
     hamming = HammingCode(n=8, secded=False)
 
     # Reuse for multiple blocks
     for block in blocks:
-        encoded = hamming.encode(block)
+        codeword, p_bits = hamming.encode(block)
         ...
         decoded, syndrome, valid = hamming.decode(received)
 """
@@ -23,13 +25,19 @@ class HammingCode:
     """
     Hamming code encoder/decoder - initialize once, reuse for all blocks.
 
-    Codeword structure (1-indexed positions):
-    - Parity bits at positions 1, 2, 4, 8, 16, ... (powers of 2)
-    - Data bits fill remaining positions: 3, 5, 6, 7, 9, 10, 11, ...
+    Systematic codeword structure:
+        [D0, D1, ..., D_{n-1}, P0, P1, ..., P_{r-1}, (P_overall for SECDED)]
+        |______ data ________|  |_______ parity _______|
 
-    Example for n=8, r=4 (positions 1-12):
-        Position:  1   2   3   4   5   6   7   8   9  10  11  12
-        Type:     P1  P2  D0  P4  D1  D2  D3  P8  D4  D5  D6  D7
+    Example for n=8, r=4:
+        Index:   0   1   2   3   4   5   6   7   8   9  10  11
+        Type:   D0  D1  D2  D3  D4  D5  D6  D7  P1  P2  P4  P8
+
+    Parity bit coverage (based on logical positions):
+        P1 covers data bits where logical_position & 1: D0, D1, D3, D4, D6
+        P2 covers data bits where logical_position & 2: D0, D2, D3, D5, D6
+        P4 covers data bits where logical_position & 4: D1, D2, D3, D7
+        P8 covers data bits where logical_position & 8: D4, D5, D6, D7
     """
 
     def __init__(self, n: int, secded: bool = False):
@@ -46,16 +54,23 @@ class HammingCode:
         # Compute r: smallest r where 2^r >= n + r + 1
         self.r = self._compute_parity_bits(n)
 
-        # Pre-compute positions (reused for every encode/decode)
-        # Parity positions (1-indexed): 1, 2, 4, 8, ...
+        # Logical positions (1-indexed, used for parity coverage calculation)
+        # Parity positions: 1, 2, 4, 8, ...
         self.parity_positions = tuple(2**i for i in range(self.r))
 
-        # Data positions (1-indexed): all non-power-of-2 up to n+r
+        # Data positions: all non-power-of-2 up to n+r
         parity_set = set(self.parity_positions)
         self.data_positions = tuple(
             i for i in range(1, n + self.r + 1)
             if i not in parity_set
         )
+
+        # Pre-compute parity coverage: which data bits each parity bit covers
+        # coverage[j] = list of data indices covered by parity bit j
+        self._parity_coverage = []
+        for p_pos in self.parity_positions:
+            coverage = [i for i, d_pos in enumerate(self.data_positions) if d_pos & p_pos]
+            self._parity_coverage.append(coverage)
 
     @property
     def parity_bit_count(self) -> int:
@@ -74,80 +89,79 @@ class HammingCode:
             r += 1
         return r
 
-    def encode(self, data: List[int]) -> List[int]:
+    def encode(self, data: List[int]) -> Tuple[List[int], List[int]]:
         """
-        Encode n data bits into (n+r) or (n+r+1) codeword.
+        Encode n data bits into systematic codeword.
 
         Args:
             data: List of n bits [d0, d1, ..., d_{n-1}]
 
         Returns:
-            Codeword as list of bits
+            Tuple of (codeword, p_bits):
+            - codeword: [data | parity] as list of bits
+            - p_bits: parity bits only (for easy access)
         """
         if len(data) != self.n:
             raise ValueError(f"Expected {self.n} data bits, got {len(data)}")
 
-        # Create codeword array (use 0-indexed, but positions are 1-indexed)
-        codeword = [0] * (self.n + self.r)
-
-        # Place data bits in data positions
-        for i, pos in enumerate(self.data_positions):
-            codeword[pos - 1] = data[i]
-
-        # Calculate each parity bit
-        for p_pos in self.parity_positions:
+        # Compute parity bits using pre-computed coverage
+        p_bits = []
+        for coverage in self._parity_coverage:
             parity = 0
-            for pos in range(1, len(codeword) + 1):
-                if pos & p_pos:
-                    parity ^= codeword[pos - 1]
-            codeword[p_pos - 1] = parity
+            for i in coverage:
+                parity ^= data[i]
+            p_bits.append(parity)
 
-        # SECDED: append overall parity
+        # SECDED: compute overall parity
         if self.secded:
             overall = 0
-            for bit in codeword:
+            for bit in data:
                 overall ^= bit
-            codeword.append(overall)
+            for bit in p_bits:
+                overall ^= bit
+            p_bits.append(overall)
 
-        return codeword
+        # Systematic codeword: data followed by parity
+        codeword = list(data) + p_bits
+
+        return codeword, p_bits
 
     def decode(self, codeword: List[int], correct: bool = False) -> Tuple[List[int], int, bool]:
         """
-        Decode codeword, detect/correct errors.
+        Decode systematic codeword, detect/correct errors.
 
         Args:
-            codeword: List of (n+r) or (n+r+1) bits
+            codeword: Systematic codeword [data | parity]
             correct: If True, attempt error correction. If False, detection-only mode
                      (better filtering with lower false positive rate).
 
         Returns:
-            Tuple of (corrected_data, syndrome, is_valid):
-            - corrected_data: n data bits (potentially corrected if correct=True)
-            - syndrome: error position (0 = no error detected by parity checks)
+            Tuple of (data_bits, syndrome, is_valid):
+            - data_bits: n data bits (potentially corrected if correct=True)
+            - syndrome: error location in logical position (0 = no error)
             - is_valid: True if no error detected (or corrected if correct=True)
         """
         expected_len = self.codeword_length
         if len(codeword) != expected_len:
             raise ValueError(f"Expected {expected_len} bits, got {len(codeword)}")
 
-        # Work with copy
-        bits = list(codeword)
+        # Split systematic codeword
+        data_bits = list(codeword[:self.n])
+        parity_bits = codeword[self.n:]
 
         # Handle SECDED overall parity
         overall_parity = 0
         if self.secded:
-            for bit in bits:
+            for bit in codeword:
                 overall_parity ^= bit
-            bits = bits[:-1]
 
-        # Calculate syndrome
+        # Calculate syndrome using pre-computed coverage
         syndrome = 0
-        for p_pos in self.parity_positions:
-            parity = 0
-            for pos in range(1, len(bits) + 1):
-                if pos & p_pos:
-                    parity ^= bits[pos - 1]
-            if parity:
+        for j, (p_pos, coverage) in enumerate(zip(self.parity_positions, self._parity_coverage)):
+            expected_parity = 0
+            for i in coverage:
+                expected_parity ^= data_bits[i]
+            if expected_parity != parity_bits[j]:
                 syndrome |= p_pos
 
         # Determine validity and correct if possible
@@ -157,31 +171,48 @@ class HammingCode:
             if syndrome == 0 and overall_parity == 0:
                 pass  # No error
             elif syndrome == 0 and overall_parity == 1:
-                # Error in overall parity bit only
+                # Error in overall parity bit only - data is fine
                 if not correct:
                     is_valid = False  # Strict detection: any parity error = invalid
             elif syndrome > 0 and overall_parity == 1:
-                # Single-bit error
-                if correct and syndrome <= len(bits):
-                    bits[syndrome - 1] ^= 1  # Correct it
+                # Single-bit error (correctable)
+                if correct:
+                    data_bits = self._correct_error(data_bits, syndrome)
                 else:
-                    is_valid = False  # Detection-only: mark invalid
+                    is_valid = False
             else:  # syndrome > 0 and overall_parity == 0
-                # Double-bit error detected
+                # Double-bit error detected (not correctable)
                 is_valid = False
         else:
             # Standard Hamming
             if syndrome > 0:
-                if correct and syndrome <= len(bits):
-                    bits[syndrome - 1] ^= 1  # Correct it
+                if correct:
+                    data_bits = self._correct_error(data_bits, syndrome)
                 else:
-                    is_valid = False  # Detection-only: mark invalid
+                    is_valid = False
 
-        # Extract data bits from corrected codeword
-        data = [bits[pos - 1] for pos in self.data_positions]
+        return data_bits, syndrome, is_valid
 
-        return data, syndrome, is_valid
+    def _correct_error(self, data_bits: List[int], syndrome: int) -> List[int]:
+        """
+        Correct single-bit error based on syndrome.
+
+        Args:
+            data_bits: Data bits (will be modified if error is in data)
+            syndrome: Logical position of error
+
+        Returns:
+            Corrected data bits
+        """
+        # Check if error is in a data position
+        for i, d_pos in enumerate(self.data_positions):
+            if d_pos == syndrome:
+                data_bits[i] ^= 1
+                return data_bits
+
+        # Error is in a parity position - data is unaffected
+        return data_bits
 
     def __repr__(self) -> str:
         mode = "SECDED" if self.secded else "Standard"
-        return f"HammingCode(n={self.n}, r={self.r}, mode={mode}, codeword={self.codeword_length})"
+        return f"HammingCode(n={self.n}, r={self.r}, mode={mode}, codeword={self.codeword_length}, systematic=True)"

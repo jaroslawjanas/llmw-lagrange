@@ -493,9 +493,10 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
 
             # Apply Hamming encoding if enabled
             if self.hamming:
-                block_bits = self.hamming.encode(y_bits)
+                block_bits, p_bits = self.hamming.encode(y_bits)
             else:
                 block_bits = y_bits
+                p_bits = []
 
             # Track this block
             block_info = {
@@ -715,7 +716,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             - 'x': x-coordinate (GF element as integer)
             - 'y': y-value as GF element converted to integer
             - 'y_bits': Data bits (flat list)
-            - 'c_bits': Parity bits (empty list for non-Hamming)
+            - 'p_bits': Parity bits (empty list for non-Hamming)
         """
         # Get token IDs from text or use provided IDs
         if generated_ids is not None:
@@ -791,7 +792,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                 'x': int(x),
                 'y': int(y_gf),
                 'y_bits': y_bits,
-                'c_bits': []
+                'p_bits': []
             })
             progress_bar.update(1)
 
@@ -840,10 +841,8 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         for start in progress_bar:
             window_bits = all_bits[start:start + window_size]
 
-            # Extract parity bits from window (at positions 1,2,4,8,... which are 0,1,3,7,... in 0-indexed)
-            c_bits = [window_bits[pos - 1] for pos in self.hamming.parity_positions]
-            if self.hamming.secded:
-                c_bits.append(window_bits[-1])  # Overall parity is last bit
+            # Systematic format: parity bits are at the end
+            p_bits = window_bits[self.n:]
 
             # Decode and check validity using Hamming
             data_bits, syndrome, is_valid = self.hamming.decode(window_bits, correct=self.correct)
@@ -857,7 +856,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
                 'x': int(x),
                 'y': int(y_gf),
                 'y_bits': data_bits,
-                'c_bits': c_bits
+                'p_bits': p_bits
             }
 
             all_blocks.append(block)
