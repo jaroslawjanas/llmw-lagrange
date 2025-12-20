@@ -656,7 +656,7 @@ class LLMWatermarkEncoder(LLMWatermarkerBase):
             'blocks_encoded': self.blocks_encoded,
             'total_tokens_generated': tokens_generated,
             'green_ratio': self.green_tokens_selected / (self.green_tokens_selected + self.red_tokens_selected + 1e-10),
-            'properly_encoded_tokens': self.properly_encoded_tokens
+            'properly_encoded_tokens_count': self.properly_encoded_tokens
         }
 
         return full_text, generated_text, generated_ids, formatted_prompt, statistics, watermark_blocks, encoded_blocks
@@ -719,7 +719,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             return self.n + self.hamming.parity_bit_count
         return self.n
         
-    def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> Tuple[List[Dict], List[Dict], int]:
+    def decode_text(self, generated_text: str = None, generated_ids: List[int] = None) -> Tuple[List[Dict], List[Dict]]:
         """
         Decode watermark information from generated text or pre-tokenized IDs.
 
@@ -728,7 +728,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             generated_ids: Pre-tokenized IDs to decode directly (bypasses tokenization)
 
         Returns:
-            Tuple of (all_blocks, valid_blocks, token_count) where each block contains:
+            Tuple of (all_blocks, valid_blocks) where each block contains:
             - 'x': x-coordinate (integer in GF(2^n))
             - 'y': y-value (integer in GF(2^n))
             - 'y_bits': Data bits (flat list)
@@ -747,9 +747,9 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             return self._decode_sliding_blocks(token_ids)
         elif self.c_correction > 0:
             # Decode fixed blocks, then apply c-correction variations
-            all_blocks, _, token_count = self._decode_fixed_blocks(token_ids)
+            all_blocks, _ = self._decode_fixed_blocks(token_ids)
             expanded_blocks = self._apply_c_correction(all_blocks)
-            return expanded_blocks, expanded_blocks, token_count
+            return expanded_blocks, expanded_blocks
         else:
             return self._decode_fixed_blocks(token_ids)
 
@@ -772,7 +772,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             all_bits.append(1 if is_green else 0)
         return all_bits
 
-    def _decode_fixed_blocks(self, token_ids: List[int]) -> Tuple[List[Dict], List[Dict], int]:
+    def _decode_fixed_blocks(self, token_ids: List[int]) -> Tuple[List[Dict], List[Dict]]:
         """
         Decode using fixed-boundary blocks (non-Hamming mode).
 
@@ -780,13 +780,13 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             token_ids: List of token IDs to decode
 
         Returns:
-            Tuple of (all_blocks, valid_blocks, token_count)
+            Tuple of (all_blocks, valid_blocks)
             For non-Hamming, all_blocks and valid_blocks are the same list.
         """
         num_blocks = len(token_ids) // self.n
 
         if num_blocks <= 1:
-            return [], [], len(token_ids)
+            return [], []
 
         blocks = []
         progress_bar = tqdm(range(num_blocks), desc="Decoding Blocks", disable=not self.verbose)
@@ -818,9 +818,9 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             progress_bar.update(1)
 
         progress_bar.close()
-        return blocks, blocks, len(token_ids)
+        return blocks, blocks
 
-    def _decode_sliding_blocks(self, token_ids: List[int]) -> Tuple[List[Dict], List[Dict], int]:
+    def _decode_sliding_blocks(self, token_ids: List[int]) -> Tuple[List[Dict], List[Dict]]:
         """
         Decode using sliding window with Hamming validity check.
 
@@ -832,14 +832,12 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             token_ids: List of token IDs to decode
 
         Returns:
-            Tuple of (all_blocks, valid_blocks, token_count)
+            Tuple of (all_blocks, valid_blocks)
             - all_blocks: Every sliding window result
             - valid_blocks: Only Hamming-valid windows
         """
         if not self.hamming:
             raise ValueError("Sliding window decode requires Hamming mode")
-
-        decoded_tokens_length = len(token_ids)
 
         # Step 1: Convert all tokens to bits
         if self.verbose:
@@ -895,7 +893,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         if self.verbose:
             print(f"Found {valid_count} valid windows, {invalid_count} invalid windows")
 
-        return all_blocks, valid_blocks, decoded_tokens_length
+        return all_blocks, valid_blocks
 
     def _generate_bit_variations(self, bits: List[int], max_distance: int) -> List[List[int]]:
         """

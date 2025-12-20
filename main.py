@@ -229,11 +229,11 @@ def main():
     
     # Initialize DataFrame with all required columns
     columns = [
-        'field_size', 'prompt', 'generated_text', 'generated_ids', 'tokens_length',
+        'field_size', 'prompt', 'generated_text', 'generated_ids', 'generated_ids_count',
         'a0', 'a1', 'recovered_a0', 'recovered_a1', 'secret_key',
         'watermark_blocks', 'encoded_blocks', 'decoded_blocks', 'valid_blocks', 'matching_blocks',
         'unique_watermark_blocks_count', 'unique_valid_blocks_count', 'unique_matching_blocks_count',
-        'properly_encoded_tokens', 'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
+        'properly_encoded_tokens_count', 'watermark_recovered', 'encoding_time', 'decoding_time', 'mcp_time'
     ]
 
     # Define explicit column types for proper data handling
@@ -242,7 +242,7 @@ def main():
         'prompt': 'string',
         'generated_text': 'string',
         'generated_ids': 'string',     # JSON string
-        'tokens_length': 'int64',
+        'generated_ids_count': 'int64',
         'a0': 'int64',
         'a1': 'int64',
         'recovered_a0': 'Int64',       # Nullable integer for None values
@@ -256,7 +256,7 @@ def main():
         'unique_watermark_blocks_count': 'int64',
         'unique_valid_blocks_count': 'int64',
         'unique_matching_blocks_count': 'int64',
-        'properly_encoded_tokens': 'int64',
+        'properly_encoded_tokens_count': 'int64',
         'watermark_recovered': 'boolean',
         'encoding_time': 'float64',
         'decoding_time': 'float64',
@@ -318,9 +318,9 @@ def main():
         # Time decoding
         decoding_start = time.time()
         if args.force_tokenization:
-            all_blocks, valid_blocks, decoded_tokens_length = decoder.decode_text(generated_text=generated_text)
+            all_blocks, valid_blocks = decoder.decode_text(generated_text=generated_text)
         else:
-            all_blocks, valid_blocks, decoded_tokens_length = decoder.decode_text(generated_ids=generated_ids)
+            all_blocks, valid_blocks = decoder.decode_text(generated_ids=generated_ids)
         decoding_time = time.time() - decoding_start
         
         if args.verbose:
@@ -428,7 +428,7 @@ def main():
         stats_df.loc[prompt_idx, 'prompt'] = prompt
         stats_df.loc[prompt_idx, 'generated_text'] = generated_text
         stats_df.loc[prompt_idx, 'generated_ids'] = json.dumps(generated_ids)
-        stats_df.loc[prompt_idx, 'tokens_length'] = decoded_tokens_length
+        stats_df.loc[prompt_idx, 'generated_ids_count'] = len(generated_ids)
         stats_df.loc[prompt_idx, 'a0'] = int(a0)
         stats_df.loc[prompt_idx, 'a1'] = int(a1)
         stats_df.loc[prompt_idx, 'recovered_a0'] = int(verification_result['recovered_a0']) if verification_result['recovered_a0'] is not None else None
@@ -442,7 +442,7 @@ def main():
         stats_df.loc[prompt_idx, 'unique_watermark_blocks_count'] = len(set((b['x'], b['y']) for b in watermark_blocks))
         stats_df.loc[prompt_idx, 'unique_valid_blocks_count'] = len(set((b['x'], b['y']) for b in valid_blocks))
         stats_df.loc[prompt_idx, 'unique_matching_blocks_count'] = len(set((b['x'], b['y']) for b in verification_result['matching_blocks']))
-        stats_df.loc[prompt_idx, 'properly_encoded_tokens'] = generation_statistics['properly_encoded_tokens']
+        stats_df.loc[prompt_idx, 'properly_encoded_tokens_count'] = generation_statistics['properly_encoded_tokens_count']
         stats_df.loc[prompt_idx, 'watermark_recovered'] = verification_result['is_valid']
         stats_df.loc[prompt_idx, 'encoding_time'] = encoding_time
         stats_df.loc[prompt_idx, 'decoding_time'] = decoding_time
@@ -468,8 +468,8 @@ def main():
     
     if args.stats:
         # Calculate total properly encoded tokens percentage across all prompts
-        total_properly_encoded = stats_df['properly_encoded_tokens'].sum()
-        total_tokens_generated = stats_df['tokens_length'].sum()
+        total_properly_encoded = stats_df['properly_encoded_tokens_count'].sum()
+        total_tokens_generated = stats_df['generated_ids_count'].sum()
         properly_encoded_percentage = (total_properly_encoded / total_tokens_generated) * 100 if total_tokens_generated > 0 else 0
 
         # Calculate average matching blocks from JSON

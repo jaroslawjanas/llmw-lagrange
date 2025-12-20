@@ -73,12 +73,12 @@ def calculate_stats(df):
             stats[f'{name}_median'] = df[col].median()
 
     # Token statistics
-    stats['properly_encoded_mean'] = df['properly_encoded_tokens'].mean()
-    stats['properly_encoded_std'] = df['properly_encoded_tokens'].std()
-    stats['properly_encoded_median'] = df['properly_encoded_tokens'].median()
+    stats['properly_encoded_mean'] = df['properly_encoded_tokens_count'].mean()
+    stats['properly_encoded_std'] = df['properly_encoded_tokens_count'].std()
+    stats['properly_encoded_median'] = df['properly_encoded_tokens_count'].median()
 
-    # Token percentage (properly_encoded / tokens_length)
-    df['_properly_encoded_pct'] = df['properly_encoded_tokens'] / df['tokens_length'] * 100
+    # Token percentage (properly_encoded / generated_ids_count)
+    df['_properly_encoded_pct'] = df['properly_encoded_tokens_count'] / df['generated_ids_count'] * 100
     stats['properly_encoded_pct_mean'] = df['_properly_encoded_pct'].mean()
     stats['properly_encoded_pct_std'] = df['_properly_encoded_pct'].std()
     stats['properly_encoded_pct_median'] = df['_properly_encoded_pct'].median()
@@ -97,12 +97,12 @@ def create_box_plots(df, output_path, model_name):
     Create 3x4 box plot figure.
 
     Rows: All, Recovered, Not Recovered
-    Cols: unique_watermark_blocks_count, unique_valid_blocks_count, unique_matching_blocks_count, properly_encoded_tokens
+    Cols: unique_watermark_blocks_count, unique_valid_blocks_count, unique_matching_blocks_count, properly_encoded_tokens_count
     """
     fig, axes = plt.subplots(3, 4, figsize=(14, 10))
 
     columns = ['unique_watermark_blocks_count', 'unique_valid_blocks_count',
-               'unique_matching_blocks_count', 'properly_encoded_tokens']
+               'unique_matching_blocks_count', 'properly_encoded_tokens_count']
     col_labels = ['Unique Watermark\nBlocks', 'Unique Valid\nBlocks',
                   'Unique Matching\nBlocks', 'Properly Encoded\nTokens']
     row_labels = ['All', 'Recovered', 'Not Recovered']

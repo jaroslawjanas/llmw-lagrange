@@ -53,20 +53,20 @@ def check_conflicts(experiments_by_model: Dict[str, List]) -> Dict[str, Dict[str
 
 def apply_min_tokens_filter(df: pd.DataFrame, min_tokens: Optional[int]) -> pd.DataFrame:
     """
-    Apply row-level filtering based on tokens_length.
+    Apply row-level filtering based on generated_ids_count.
 
     Args:
-        df: DataFrame with tokens_length and _max_tokens columns
+        df: DataFrame with generated_ids_count and _max_tokens columns
         min_tokens: Global threshold (if specified) or None to use per-row _max_tokens
 
     Returns:
         Filtered DataFrame
     """
     if min_tokens is not None:
-        return df[df['tokens_length'] >= min_tokens].copy()
+        return df[df['generated_ids_count'] >= min_tokens].copy()
     else:
         # Use per-experiment max_tokens as threshold
-        return df[df['tokens_length'] >= df['_max_tokens']].copy()
+        return df[df['generated_ids_count'] >= df['_max_tokens']].copy()
 
 
 def load_and_prepare_experiments(

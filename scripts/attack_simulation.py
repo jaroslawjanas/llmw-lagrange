@@ -392,9 +392,9 @@ def _process_row_task(task: Dict) -> Tuple[List[Dict], Dict[str, float]]:
     for r in results:
         r['model'] = task['model']
         r['row_idx'] = task['row_idx']
-        r['tokens_length'] = task['tokens_length']
+        r['generated_ids_count'] = task['generated_ids_count']
         r['budget'] = task['budget']
-        r['budget_pct'] = task['budget'] / task['tokens_length'] * 100 if task['tokens_length'] > 0 else 0
+        r['budget_pct'] = task['budget'] / task['generated_ids_count'] * 100 if task['generated_ids_count'] > 0 else 0
 
     return results, cache.timing.copy()
 
@@ -625,8 +625,8 @@ def run_simulation(
 
         for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"  Processing"):
             # Calculate fixed budget for this row
-            tokens_length = int(row['tokens_length'])
-            budget = max(1, int(tokens_length * perturbation_pct / 100))
+            generated_ids_count = int(row['generated_ids_count'])
+            budget = max(1, int(generated_ids_count * perturbation_pct / 100))
 
             # Deterministic RNG per row (matches parallel mode)
             row_rng = random.Random(seed + idx)
@@ -646,9 +646,9 @@ def run_simulation(
             for result in row_results:
                 result['model'] = model
                 result['row_idx'] = idx
-                result['tokens_length'] = tokens_length
+                result['generated_ids_count'] = generated_ids_count
                 result['budget'] = budget
-                result['budget_pct'] = budget / tokens_length * 100 if tokens_length > 0 else 0
+                result['budget_pct'] = budget / generated_ids_count * 100 if generated_ids_count > 0 else 0
                 all_results.append(result)
 
         cache.print_timing()
@@ -695,8 +695,8 @@ def run_simulation_parallel(
         # Prepare tasks - one per row
         tasks = []
         for idx, row in df.iterrows():
-            tokens_length = int(row['tokens_length'])
-            budget = max(1, int(tokens_length * perturbation_pct / 100))
+            generated_ids_count = int(row['generated_ids_count'])
+            budget = max(1, int(generated_ids_count * perturbation_pct / 100))
             row_seed = seed + idx  # Deterministic seed per row
 
             tasks.append({
@@ -706,7 +706,7 @@ def run_simulation_parallel(
                 'groups_list': groups_list,
                 'model': model,
                 'row_idx': idx,
-                'tokens_length': tokens_length,
+                'generated_ids_count': generated_ids_count,
                 'seed': row_seed,
             })
 
