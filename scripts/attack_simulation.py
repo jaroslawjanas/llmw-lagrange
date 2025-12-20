@@ -41,6 +41,40 @@ def get_device(no_cuda: bool) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def check_device_consistency(prepared_data: Dict, current_device: str) -> None:
+    """Check that all experiments were encoded with the same device.
+
+    torch.randperm produces different results on CPU vs CUDA, so the decoder
+    must use the same device as was used during encoding.
+
+    Args:
+        prepared_data: Output from load_and_prepare_experiments()
+        current_device: Current device ('cuda' or 'cpu')
+
+    Raises:
+        SystemExit: If any experiment's encoding device doesn't match current device
+    """
+    mismatches = []
+
+    for model, model_data in prepared_data.items():
+        config = model_data['config']
+        encoding_device = config.get('device')
+
+        if encoding_device is not None and encoding_device != current_device:
+            mismatches.append((model, encoding_device))
+
+    if mismatches:
+        print("ERROR: Device mismatch detected!")
+        print(f"  Current device: {current_device}")
+        print(f"  Experiments encoded with different device:")
+        for model, enc_device in mismatches:
+            print(f"    - {model}: {enc_device}")
+        print()
+        print("torch.randperm produces different results on CPU vs CUDA.")
+        print("The decoder MUST use the same device as was used during encoding.")
+        sys.exit(1)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Simulate attacks on watermarked text",
@@ -970,6 +1004,9 @@ def main():
         force=args.force,
         verbose=True
     )
+
+    # Check device consistency
+    check_device_consistency(prepared_data, device)
 
     # Run simulation (serial or parallel)
     t_start = time.perf_counter()

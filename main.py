@@ -203,6 +203,7 @@ def main():
     # Save run configuration
     run_config = {
         'model': args.model,
+        'device': device,
         'max_tokens': args.max_tokens,
         'green_fraction': args.green_fraction,
         'bias': args.bias,
