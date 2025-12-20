@@ -294,8 +294,10 @@ output/
 | `decoded_blocks` | All decoded blocks (JSON) |
 | `valid_blocks` | Valid blocks after filtering (JSON) |
 | `matching_blocks` | Blocks matching watermark y-values (JSON) |
-| `properly_encoded_tokens` | Tokens matching intended bias |
-| `unique_*_count` | Unique block counts for various categories |
+| `properly_encoded_tokens_count` | Tokens matching intended bias |
+| `unique_watermark_blocks_count` | Count of unique watermark blocks |
+| `unique_valid_blocks_count` | Count of unique valid blocks |
+| `unique_matching_blocks_count` | Count of unique matching blocks |
 | `encoding_time`, `decoding_time`, `mcp_time` | Timing information |
 
 ## Important Implementation Details
@@ -316,7 +318,7 @@ output/
 ### Token Selection
 - Token selection is **biased, not enforced**
 - Some bits may not encode correctly due to model preferences
-- `properly_encoded_tokens` tracks encoding accuracy
+- `properly_encoded_tokens_count` tracks encoding accuracy
 
 ### Hamming Mode
 - Uses systematic format: data bits followed by parity bits
@@ -352,7 +354,7 @@ Some models without proper chat templates produce AutoProcessor warnings (non-cr
 ## Development Notes
 
 - Token selection is biased, not enforced - some bits may not encode correctly
-- `properly_encoded_tokens` tracks how many tokens matched intended bias direction
+- `properly_encoded_tokens_count` tracks how many tokens matched intended bias direction
 - C-correction with c ≥ 3 generates many variants (n choose c) - can be slow
 
 ## Contributing
