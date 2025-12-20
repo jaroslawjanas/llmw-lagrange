@@ -39,6 +39,8 @@ def main():
                         help="Enable Hamming error correction (default: detection-only for better filtering)")
     parser.add_argument("--c-correction", type=int, default=0,
                         help="Enable c-correction mode: generate all bit-flip variations up to this Hamming distance (e.g., 1 or 2). Incompatible with --hamming and --correct.")
+    parser.add_argument("--output-dir", type=str, default="output",
+                        help="Base output directory for results (default: output)")
 
     args = parser.parse_args()
 
@@ -195,8 +197,8 @@ def main():
     dataset_name_clean = dataset_name.replace("/", "_")
     
     output_subdir = f"{model_name_clean}_{dataset_name_clean}_n{args.n}_{timestamp}"
-    output_dir = os.path.join("output", output_subdir)
-    os.makedirs(output_dir, exist_ok=True)
+    experiment_dir = os.path.join(args.output_dir, output_subdir)
+    os.makedirs(experiment_dir, exist_ok=True)
 
     # Save run configuration
     run_config = {
@@ -218,12 +220,12 @@ def main():
         'timestamp': timestamp,
         'output_dir': output_subdir
     }
-    config_file = os.path.join(output_dir, "run_config.json")
+    config_file = os.path.join(experiment_dir, "run_config.json")
     with open(config_file, 'w') as f:
         json.dump(run_config, f, indent=2)
 
-    stats_file = os.path.join(output_dir, "statistics.csv")
-    stats_parquet_file = os.path.join(output_dir, "statistics.parquet")
+    stats_file = os.path.join(experiment_dir, "statistics.csv")
+    stats_parquet_file = os.path.join(experiment_dir, "statistics.parquet")
     
     # Initialize DataFrame with all required columns
     columns = [
