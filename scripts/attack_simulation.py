@@ -595,7 +595,7 @@ def run_simulation_for_row(
 
             # Decode attacked tokens
             t0 = time.perf_counter()
-            all_blocks, valid_blocks, _ = decoder.decode_text(generated_ids=attacked_ids)
+            all_blocks, valid_blocks = decoder.decode_text(generated_ids=attacked_ids)
             cache.timing['decode'] += time.perf_counter() - t0
 
             # Use valid_blocks for Hamming mode, all_blocks otherwise
