@@ -90,6 +90,8 @@ Examples:
                         help="Min tokens filter. Default: use each experiment's max_tokens")
     parser.add_argument("--perturbation-rate", type=int, default=10,
                         help="Max perturbation as %% of tokens (default: 10)")
+    parser.add_argument("--input-dir", type=str, default=None,
+                        help="Input directory containing experiments (default: output/)")
     parser.add_argument("--output-dir", type=str, default="output/attacks",
                         help="Output directory for results (default: output/attacks)")
     parser.add_argument("--force", action="store_true",
@@ -1002,6 +1004,7 @@ def main():
     prepared_data = load_and_prepare_experiments(
         min_tokens=args.min_tokens,
         force=args.force,
+        input_dir=args.input_dir,
         verbose=True
     )
 
