@@ -74,7 +74,7 @@ def load_and_prepare_experiments(
     force: bool = False,
     input_dir: Optional[str] = None,
     verbose: bool = True
-) -> Dict[str, Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
     Unified data loading for analysis scripts.
 
@@ -93,12 +93,14 @@ def load_and_prepare_experiments(
         verbose: If True, print progress information
 
     Returns:
-        dict: {model_name: {'df': DataFrame, 'sources': list, 'config': dict, ...}}
-              - df: Merged and filtered DataFrame for this model
-              - sources: List of source directory names
-              - config: Representative config dict (from first experiment)
-              - total_rows: Total rows before filtering
-              - included_rows: Rows after filtering
+        dict with keys:
+            - 'base_path': Path to the base directory used for loading experiments
+            - 'models': {model_name: {'df': DataFrame, 'sources': list, 'config': dict, ...}}
+                - df: Merged and filtered DataFrame for this model
+                - sources: List of source directory names
+                - config: Representative config dict (from first experiment)
+                - total_rows: Total rows before filtering
+                - included_rows: Rows after filtering
 
     Raises:
         SystemExit: If no experiments found or conflicts detected without --force
@@ -158,8 +160,11 @@ def load_and_prepare_experiments(
     elif conflicts and verbose:
         print("\nWARNING: Conflicting parameters detected, proceeding with --force.\n")
 
+    # Use the loader's resolved output_dir for config copying
+    base_path = loader.output_dir
+
     # Process each model group
-    result = {}
+    models = {}
     for model, model_experiments in experiments_by_model.items():
         # Merge DataFrames, adding config fields
         dfs = []
@@ -191,7 +196,7 @@ def load_and_prepare_experiments(
         # Get representative config (from first experiment)
         rep_config = model_experiments[0].config or {}
 
-        result[model] = {
+        models[model] = {
             'df': model_df,
             'sources': source_dirs,
             'config': rep_config,
@@ -199,8 +204,11 @@ def load_and_prepare_experiments(
             'included_rows': included_rows
         }
 
-    if not result:
+    if not models:
         print("No data remaining after filtering.")
         sys.exit(1)
 
-    return result
+    return {
+        'base_path': base_path,
+        'models': models
+    }

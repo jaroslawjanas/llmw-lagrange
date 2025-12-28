@@ -1001,12 +1001,14 @@ def main():
     random.seed(args.seed)
 
     # Load and prepare experiments
-    prepared_data = load_and_prepare_experiments(
+    result = load_and_prepare_experiments(
         min_tokens=args.min_tokens,
         force=args.force,
         input_dir=args.input_dir,
         verbose=True
     )
+    base_path = result['base_path']
+    prepared_data = result['models']
 
     # Check device consistency
     check_device_consistency(prepared_data, device)
@@ -1048,7 +1050,7 @@ def main():
         configs_dir = output_dir / 'source_configs'
         configs_dir.mkdir(exist_ok=True)
         for source_dir in all_source_dirs:
-            config_src = Path('output') / source_dir / 'run_config.json'
+            config_src = base_path / source_dir / 'run_config.json'
             if config_src.exists():
                 config_dst = configs_dir / f'{source_dir}.json'
                 shutil.copy(config_src, config_dst)

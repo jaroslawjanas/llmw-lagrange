@@ -224,12 +224,14 @@ def main():
     args = parse_args()
 
     # Load and prepare experiments using unified loader
-    prepared_data = load_and_prepare_experiments(
+    result = load_and_prepare_experiments(
         min_tokens=args.min_tokens,
         force=args.force,
         input_dir=args.input_dir,
         verbose=True
     )
+    base_path = result['base_path']
+    prepared_data = result['models']
 
     # Create output directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -241,7 +243,7 @@ def main():
     configs_dir.mkdir(exist_ok=True)
     for model_data in prepared_data.values():
         for source_dir in model_data['sources']:
-            config_src = Path('output') / source_dir / 'run_config.json'
+            config_src = base_path / source_dir / 'run_config.json'
             if config_src.exists():
                 config_dst = configs_dir / f'{source_dir}.json'
                 shutil.copy(config_src, config_dst)
