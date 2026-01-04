@@ -7,10 +7,12 @@ For verified watermarked samples (where recovered a0/a1 match original):
 """
 import argparse
 import json
+import multiprocessing as mp
 import sys
 import time
+from multiprocessing import cpu_count
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -20,6 +22,48 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from lib import load_and_prepare_experiments
 from src.pm_galois import GaloisField, max_collinear_points, recover_line_equation
+
+
+# =============================================================================
+# Multiprocessing Support
+# =============================================================================
+
+# Worker process state (initialized once per worker)
+_worker_gf: Optional[GaloisField] = None
+
+
+def _init_worker(n: int) -> None:
+    """Initialize worker process with its own GaloisField instance."""
+    global _worker_gf
+    _worker_gf = GaloisField(n)
+
+
+def _process_sample(sample: Dict) -> Optional[int]:
+    """
+    Process a single sample in a worker process.
+
+    Returns:
+        Collinear count if verified, None otherwise
+    """
+    global _worker_gf
+
+    blocks = sample['blocks']
+    a0_orig = sample['a0']
+    a1_orig = sample['a1']
+
+    # Run MCP
+    count, slope, collinear_pts = max_collinear_points(blocks, _worker_gf)
+
+    # Verify line recovery
+    if count >= 2 and len(collinear_pts) >= 2:
+        try:
+            recovered_a0, recovered_a1 = recover_line_equation(collinear_pts, _worker_gf)
+            if recovered_a0 == a0_orig and recovered_a1 == a1_orig:
+                return count
+        except ValueError:
+            pass
+
+    return None
 
 
 class GFCache:
@@ -56,6 +100,8 @@ Examples:
                         help="Show progress bars")
     parser.add_argument("--output-dir", type=str, default="output/tp_count_histogram",
                         help="Output directory (default: output/tp_count_histogram)")
+    parser.add_argument("-j", "--workers", type=int, default=1,
+                        help="Number of worker processes (default: 1, 0=auto)")
     return parser.parse_args()
 
 
@@ -117,7 +163,8 @@ def extract_samples(df: pd.DataFrame, config: Dict, verbose: bool = False) -> Li
 def compute_mcp_verified(
     samples: List[Dict],
     gf_cache: GFCache,
-    verbose: bool = False
+    verbose: bool = False,
+    num_workers: int = 1
 ) -> np.ndarray:
     """
     Run MCP on samples and verify line recovery.
@@ -126,17 +173,40 @@ def compute_mcp_verified(
         samples: List of sample dicts
         gf_cache: GaloisField cache
         verbose: Show progress bar
+        num_workers: Number of worker processes (1=sequential)
 
     Returns:
         Array of max_collinear_count for VERIFIED samples only
         (where recovered_a0 == a0 and recovered_a1 == a1)
     """
+    if not samples:
+        return np.array([])
+
+    n = samples[0]['n']  # All samples have the same n
+
+    # Parallel processing
+    if num_workers != 1:
+        if num_workers == 0:
+            num_workers = min(cpu_count(), 8)
+
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(num_workers, initializer=_init_worker, initargs=(n,)) as pool:
+            results = list(tqdm(
+                pool.imap(_process_sample, samples),
+                total=len(samples),
+                desc="MCP",
+                disable=not verbose
+            ))
+
+        verified_scores = [r for r in results if r is not None]
+        return np.array(verified_scores)
+
+    # Sequential processing
     verified_scores = []
+    gf = gf_cache.get(n)
 
     iterator = tqdm(samples, desc="MCP", disable=not verbose)
     for sample in iterator:
-        n = sample['n']
-        gf = gf_cache.get(n)
         blocks = sample['blocks']
         a0_orig = sample['a0']
         a1_orig = sample['a1']
@@ -241,7 +311,12 @@ def main() -> int:
         config = model_data['config']
         n = config.get('n', 8)
 
-        print(f"\nModel: {model} (n={n})")
+        # Determine workers
+        num_workers = args.workers
+        if num_workers == 0:
+            num_workers = min(cpu_count(), 8)
+        workers_info = f", workers={num_workers}" if num_workers > 1 else ""
+        print(f"\nModel: {model} (n={n}{workers_info})")
 
         # Extract samples
         samples = extract_samples(df, config, args.verbose)
@@ -253,7 +328,7 @@ def main() -> int:
 
         # Run MCP, get verified scores
         t0 = time.perf_counter()
-        verified_scores = compute_mcp_verified(samples, gf_cache, args.verbose)
+        verified_scores = compute_mcp_verified(samples, gf_cache, args.verbose, args.workers)
         elapsed = time.perf_counter() - t0
 
         print(f"  Verified: {len(verified_scores)} ({100 * len(verified_scores) / len(samples):.1f}%)")
