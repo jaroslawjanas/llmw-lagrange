@@ -140,20 +140,51 @@ def parse_groups_arg(groups_arg: str) -> List[int]:
     return sorted(set(groups))  # Remove duplicates and sort
 
 
-def split_budget(budget: int, num_groups: int) -> List[int]:
-    """Split budget into num_groups sizes.
+def split_budget(budget: int, num_groups: int, rng: random.Random) -> List[int]:
+    """Split budget into num_groups random sizes (each >= 1).
 
-    Example: split_budget(10, 3) → [4, 3, 3]
+    Uses stars-and-bars method for uniform random partitions.
+    Example: split_budget(10, 3, rng) might return [2, 5, 3] or [1, 8, 1], etc.
+
+    Raises:
+        ValueError: If num_groups <= 0 or budget < num_groups
     """
     if num_groups <= 0:
-        return []
-    num_groups = min(num_groups, budget)  # Can't have more groups than budget
-    if num_groups == 0:
-        return []
+        raise ValueError(f"num_groups must be > 0, got {num_groups}")
+    if budget < num_groups:
+        raise ValueError(f"budget ({budget}) must be >= num_groups ({num_groups})")
+    if num_groups == 1:
+        return [budget]
 
-    base = budget // num_groups
-    remainder = budget % num_groups
-    return [base + 1] * remainder + [base] * (num_groups - remainder)
+    # Stars and bars: choose (num_groups - 1) cut points from (budget - 1) positions
+    cuts = sorted(rng.sample(range(1, budget), num_groups - 1))
+
+    # Compute group sizes from cut points
+    sizes = []
+    prev = 0
+    for cut in cuts:
+        sizes.append(cut - prev)
+        prev = cut
+    sizes.append(budget - prev)
+
+    return sizes
+
+
+def validate_min_tokens_for_deletion(min_tokens: int, perturbation_rate: int) -> None:
+    """Validate min_tokens is sufficient for deletion attacks.
+
+    For deletion attacks, budget must be <= (token_count - 1).
+    This requires: min_tokens >= 100 / (100 - perturbation_rate)
+
+    Raises:
+        ValueError: If min_tokens is too small for the perturbation rate
+    """
+    required = 100 / (100 - perturbation_rate)
+    if min_tokens < required:
+        raise ValueError(
+            f"min_tokens ({min_tokens}) too small for {perturbation_rate}% perturbation. "
+            f"Need >= {int(required) + 1} to ensure deletion attacks are valid."
+        )
 
 
 def distribute_gaps(free_space: int, num_gaps: int, rng: random.Random) -> List[int]:
@@ -471,12 +502,15 @@ def run_simulation_for_row(
     a1 = int(row['a1'])
     secret_key = row['secret_key']
 
-    # Get config params
-    n = config.get('n', 8)
-    hamming_mode = config.get('hamming', 'none')
-    correct = config.get('correct', False)
-    green_fraction = config.get('green_fraction', 0.5)
-    model_name = config.get('model', 'unknown')
+    # Get config params (all required)
+    for key in ('n', 'hamming', 'correct', 'green_fraction', 'model'):
+        if key not in config:
+            raise ValueError(f"Config missing required key: '{key}'")
+    n = config['n']
+    hamming_mode = config['hamming']
+    correct = config['correct']
+    green_fraction = config['green_fraction']
+    model_name = config['model']
 
     # Get cached GF instance and MCP solver
     t0 = time.perf_counter()
@@ -501,12 +535,12 @@ def run_simulation_for_row(
     vocab_size = decoder.vocab_size
 
     # Parse watermark blocks for matching calculation
-    watermark_blocks = json.loads(row['watermark_blocks']) if row.get('watermark_blocks') else []
+    watermark_blocks = json.loads(row['watermark_blocks'])
 
     # Baseline (groups=0): Use original stats from data (no attack)
     baseline_recovered = bool(row['watermark_recovered'])
-    baseline_valid = int(row.get('unique_valid_blocks_count', 0))
-    baseline_matching = int(row.get('unique_matching_blocks_count', 0))
+    baseline_valid = int(row['unique_valid_blocks_count'])
+    baseline_matching = int(row['unique_matching_blocks_count'])
 
     attack_types = ['insertion', 'deletion', 'substitution']
 
@@ -524,24 +558,11 @@ def run_simulation_for_row(
     for num_groups in groups_list:
         # Can't have more groups than budget
         effective_groups = min(num_groups, budget)
-        group_sizes = split_budget(budget, effective_groups)
+        group_sizes = split_budget(budget, effective_groups, rng)
 
         for attack_type in attack_types:
             t0 = time.perf_counter()
-
-            # For deletion, ensure we don't delete more than len-1 tokens
-            if attack_type == 'deletion':
-                max_deletable = len(generated_ids) - 1
-                if budget > max_deletable:
-                    # Reduce budget for this specific attack
-                    adjusted_budget = max_deletable
-                    adjusted_groups = min(effective_groups, max_deletable)
-                    adjusted_sizes = split_budget(adjusted_budget, adjusted_groups)
-                else:
-                    adjusted_sizes = group_sizes
-                attack_group_sizes = adjusted_sizes
-            else:
-                attack_group_sizes = group_sizes
+            attack_group_sizes = group_sizes
 
             # Skip if no valid attack possible
             if not attack_group_sizes or sum(attack_group_sizes) == 0:
@@ -614,7 +635,7 @@ def run_simulation_for_row(
 
             # Count unique valid/matching blocks
             unique_valid = len(set((b['x'], b['y']) for b in blocks_for_mcp))
-            unique_matching = len(set((b['x'], b['y']) for b in verification.get('matching_blocks', [])))
+            unique_matching = len(set((b['x'], b['y']) for b in verification['matching_blocks']))
 
             results.append({
                 'groups': num_groups,
@@ -856,6 +877,38 @@ def format_summary_report(results_df: pd.DataFrame, args, groups_list: List[int]
     return '\n'.join(lines)
 
 
+def generate_recovery_csv(results_df: pd.DataFrame, output_path: Path) -> None:
+    """Generate CSV with recovery rates by attack type and group count.
+
+    Args:
+        results_df: DataFrame with simulation results
+        output_path: Path to save the CSV file
+    """
+    attack_types = ['insertion', 'deletion', 'substitution']
+    all_groups = sorted(results_df['groups'].unique())
+
+    rows = []
+    for attack_type in attack_types:
+        attack_data = results_df[results_df['attack_type'] == attack_type]
+        baseline_rate = None
+
+        for g in all_groups:
+            rate = attack_data[attack_data['groups'] == g]['recovered'].mean() * 100
+            if g == 0:
+                baseline_rate = rate
+            drop = baseline_rate - rate if baseline_rate is not None else 0.0
+            rows.append({
+                'attack_type': attack_type,
+                'groups': g,
+                'recovery_rate': rate,
+                'drop_from_baseline': drop
+            })
+
+    recovery_df = pd.DataFrame(rows)
+    recovery_df.to_csv(output_path, index=False)
+    print(f"Saved recovery rates: {output_path}")
+
+
 def generate_recovery_graph(results_df: pd.DataFrame, output_path: Path,
                             perturbation_pct: int) -> None:
     """Generate PNG with 3 subplots showing recovery rate vs groups for each attack type.
@@ -868,8 +921,6 @@ def generate_recovery_graph(results_df: pd.DataFrame, output_path: Path,
     attack_types = ['insertion', 'deletion', 'substitution']
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    fig.suptitle(f'Watermark Recovery Rate vs Attack Groups (Budget: {perturbation_pct}% of tokens)',
-                 fontsize=14, fontweight='bold')
 
     for ax, attack_type in zip(axes, attack_types):
         attack_data = results_df[results_df['attack_type'] == attack_type]
@@ -881,7 +932,7 @@ def generate_recovery_graph(results_df: pd.DataFrame, output_path: Path,
 
         # Plot
         ax.plot(groups, rates, marker='o', linewidth=2, markersize=6)
-        ax.set_xlabel('Number of Attack Groups', fontsize=11)
+        ax.set_xlabel('Number of adversarial interventions', fontsize=11)
         ax.set_ylabel('Recovery Rate (%)', fontsize=11)
         ax.set_title(attack_type.capitalize(), fontsize=12, fontweight='bold')
         ax.set_ylim(0, 105)
@@ -917,8 +968,6 @@ def generate_combined_recovery_graph(results_df: pd.DataFrame, output_path: Path
     colors = {'insertion': 'tab:blue', 'deletion': 'tab:orange', 'substitution': 'tab:red'}
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    fig.suptitle(f'Watermark Recovery Rate vs Attack Groups (Budget: {perturbation_pct}% of tokens)',
-                 fontsize=14, fontweight='bold')
 
     baseline_rate = None
 
@@ -938,7 +987,7 @@ def generate_combined_recovery_graph(results_df: pd.DataFrame, output_path: Path
         ax.plot(groups, rates, marker='o', linewidth=2, markersize=6,
                 color=colors[attack_type], label=attack_type.capitalize())
 
-    ax.set_xlabel('Number of Attack Groups', fontsize=11)
+    ax.set_xlabel('Number of adversarial interventions', fontsize=11)
     ax.set_ylabel('Recovery Rate (%)', fontsize=11)
     ax.set_ylim(0, 105)
     ax.grid(True, alpha=0.3)
@@ -1013,6 +1062,19 @@ def main():
     # Check device consistency
     check_device_consistency(prepared_data, device)
 
+    # Validate min_tokens is sufficient for deletion attacks
+    if args.min_tokens is not None:
+        effective_min_tokens = args.min_tokens
+    else:
+        # Use minimum max_tokens across all experiments
+        max_tokens_values = []
+        for model, model_data in prepared_data.items():
+            if 'max_tokens' not in model_data['config']:
+                raise ValueError(f"Experiment '{model}' missing 'max_tokens' in config")
+            max_tokens_values.append(model_data['config']['max_tokens'])
+        effective_min_tokens = min(max_tokens_values)
+    validate_min_tokens_for_deletion(effective_min_tokens, args.perturbation_rate)
+
     # Run simulation (serial or parallel)
     t_start = time.perf_counter()
     if num_workers == 1:
@@ -1066,6 +1128,10 @@ def main():
 
     combined_graph_path = output_dir / "recovery_rate_combined.png"
     generate_combined_recovery_graph(results_df, combined_graph_path, args.perturbation_rate)
+
+    # Generate recovery rate CSV
+    recovery_csv_path = output_dir / "recovery_rate.csv"
+    generate_recovery_csv(results_df, recovery_csv_path)
 
     # Generate and save summary
     summary = format_summary_report(results_df, args, groups_list, timing, all_source_dirs, elapsed)
