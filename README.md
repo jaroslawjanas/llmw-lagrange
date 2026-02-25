@@ -1,8 +1,29 @@
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![arXiv](https://img.shields.io/badge/arXiv-2505.05712-b31b1b.svg)](https://arxiv.org/abs/2505.05712)
+
 # LLMW-Lagrange: LLM Text Watermarking with Lagrange Interpolation
 
 A robust implementation of LLM text watermarking based on Lagrange interpolation over Galois fields. This system embeds multi-bit watermarks in AI-generated text, enabling traceability and authenticity verification even under adversarial manipulation.
 
 **Based on:** [LLM-Text Watermarking based on Lagrange Interpolation](https://arxiv.org/abs/2505.05712)
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Command Line Arguments](#command-line-arguments)
+- [Architecture](#architecture)
+- [Analysis Tools](#analysis-tools)
+- [Output Structure](#output-structure)
+- [Important Implementation Details](#important-implementation-details)
+- [Performance Considerations](#performance-considerations)
+- [Known Issues](#known-issues)
+- [Contributing](#contributing)
+- [Citation](#citation)
+- [Acknowledgments](#acknowledgments)
 
 ## Overview
 
@@ -19,7 +40,7 @@ This project implements a multi-bit watermarking technique for large language mo
 ## Key Features
 
 - **Multi-bit Watermarking**: Embeds n-bit blocks using Lagrange interpolation over Galois fields GF(2ⁿ)
-- **Configurable Field Sizes**: Supports n from 1 to 20 (field sizes from 2 to 2²⁰)
+- **Configurable Field Sizes**: Supports n from 1 to 26 (field sizes from 2 to 2²⁶)
 - **Error Detection/Correction**:
   - Standard Hamming codes (correct 1-bit errors)
   - SECDED mode (correct 1-bit, detect 2-bit errors)
@@ -37,7 +58,7 @@ git clone https://github.com/jaroslawjanas/llmw-lagrange.git
 cd llmw-lagrange
 ```
 
-2. Create and activate the conda environment:
+2. Create and activate the conda environment (Python 3.10+):
 ```bash
 conda env create -f environment.yml
 conda activate llmw-lagrange
@@ -106,57 +127,34 @@ python main.py --prompt "Your prompt" --c-correction 1
 
 ## Command Line Arguments
 
-### Core Parameters
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--model` | HuggingFace model identifier | `facebook/opt-125m` |
-| `--max-tokens` | Maximum tokens to generate (must be divisible by tokens_per_block) | 304 |
-| `--n` | Galois field size parameter GF(2ⁿ) and block size | 8 |
-| `--prompt` | Custom text prompt | - |
-| `--seed` | Random seed for reproducibility | 42 |
-
-### Watermarking Parameters
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--green-fraction` | Fraction of vocabulary in green list | 0.5 |
-| `--bias` | Logit bias for watermark tokens | 6.0 |
-
-### Generation Parameters
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--temperature` | Sampling temperature (0 = greedy) | 0.0 |
-| `--context-window` | Maximum context length | 1500 |
-| `--hash-window` | Previous tokens for hashing | 1 |
-
-### Dataset Parameters
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--dataset` | HuggingFace dataset (4 args: name subset split column) | essays-with-instructions |
-| `--n-prompts` | Number of prompts to process (or "all") | 1 |
-
-### Error Handling Parameters
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--hamming` | Hamming code mode: "none", "standard", or "secded" | none |
-| `--correct` | Enable Hamming error correction (default: detection-only) | false |
-| `--c-correction` | Enable c-correction: generate all bit-flip variations up to this Hamming distance | 0 |
-
-### System Parameters
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--cache-dir` | Cache directory for models/datasets | ./cache |
-| `--no-cuda` | Disable CUDA acceleration | false |
-| `--verbose` | Show detailed output | false |
-| `--stats` | Display statistics summary | false |
-| `--force-tokenization` | Force detokenization and retokenization (not recommended) | false |
+| Category | Argument | Description | Default |
+|----------|----------|-------------|---------|
+| **Core** | `--model` | HuggingFace model identifier | `facebook/opt-125m` |
+| | `--max-tokens` | Maximum tokens to generate (must be divisible by tokens_per_block) | 304 |
+| | `--n` | Galois field size parameter GF(2ⁿ) and block size | 8 |
+| | `--prompt` | Custom text prompt | - |
+| | `--seed` | Random seed for reproducibility | 42 |
+| **Watermark** | `--green-fraction` | Fraction of vocabulary in green list | 0.5 |
+| | `--bias` | Logit bias for watermark tokens | 6.0 |
+| **Generation** | `--temperature` | Sampling temperature (0 = greedy) | 0.0 |
+| | `--context-window` | Maximum context length | 1500 |
+| | `--hash-window` | Previous tokens for hashing | 1 |
+| **Dataset** | `--dataset` | HuggingFace dataset (4 args: name subset split column) | essays-with-instructions |
+| | `--n-prompts` | Number of prompts to process (or "all") | 1 |
+| **Error Handling** | `--hamming` | Hamming code mode: "none", "standard", or "secded" | none |
+| | `--correct` | Enable Hamming error correction (default: detection-only) | false |
+| | `--c-correction` | Enable c-correction: generate all bit-flip variations up to this Hamming distance | 0 |
+| **System** | `--cache-dir` | Cache directory for models/datasets | ./cache |
+| | `--no-cuda` | Disable CUDA acceleration | false |
+| | `--verbose` | Show detailed output | false |
+| | `--stats` | Display statistics summary | false |
+| | `--output-dir` | Base output directory for results | `output` |
+| | `--force-tokenization` | Force detokenization and retokenization (not recommended) | false |
 
 ## Architecture
+
+<details>
+<summary>Click to expand architecture details</summary>
 
 ### Core Components
 
@@ -171,11 +169,13 @@ src/
 
 scripts/
 ├── lib/
-│   ├── __init__.py      # Package exports
-│   ├── loader.py        # ExperimentLoader class
-│   └── data_utils.py    # Shared data loading utilities
-├── analyze.py           # Experiment analysis with statistics and plots
-└── attack_simulation.py # Attack robustness testing
+│   ├── __init__.py          # Package exports
+│   ├── loader.py            # ExperimentLoader class
+│   └── data_utils.py        # Shared data loading utilities
+├── analyze.py               # Experiment analysis with statistics and plots
+├── attack_simulation.py     # Attack robustness testing
+├── tp_count_histogram.py    # True positive count histogram by collinear points
+└── attack_recovery_plot.py  # Recovery rate plotting from attack CSV outputs
 ```
 
 ### Pipeline Classes
@@ -234,6 +234,8 @@ Verification:
   → recover line → compare (a₀, a₁)
 ```
 
+</details>
+
 ## Analysis Tools
 
 ### Experiment Analysis
@@ -282,7 +284,8 @@ output/
     └── statistics.parquet # Efficient binary format
 ```
 
-### Statistics Columns
+<details>
+<summary>Statistics columns reference</summary>
 
 | Column | Description |
 |--------|-------------|
@@ -300,7 +303,12 @@ output/
 | `unique_matching_blocks_count` | Count of unique matching blocks |
 | `encoding_time`, `decoding_time`, `mcp_time` | Timing information |
 
+</details>
+
 ## Important Implementation Details
+
+<details>
+<summary>Click to expand implementation details</summary>
 
 ### Device Consistency
 **Critical**: `torch.randperm` produces different results on CPU vs CUDA. The decoder must use the same device as the encoder. This also applies to attack simulation scripts.
@@ -330,7 +338,12 @@ output/
 - Generates (n choose c) variations per block for c-bit correction
 - High values (>2) generate many variations and slow down MCP
 
+</details>
+
 ## Performance Considerations
+
+<details>
+<summary>Click to expand performance notes</summary>
 
 - **Memory**: Large models and long generations require significant memory
 - **GPU**: CUDA support recommended for faster inference
@@ -339,7 +352,12 @@ output/
 - **C-Correction**: Use low values (1-2) to avoid combinatorial explosion
 - **Multiprocessing**: Attack simulation scales well with multiple cores
 
+</details>
+
 ## Known Issues
+
+<details>
+<summary>Click to expand known issues</summary>
 
 ### Module Import Pattern
 Always import paths as a module:
@@ -351,11 +369,7 @@ from src.paths import CACHE_DIR  # Wrong - won't see updates
 ### Chat Template Warnings
 Some models without proper chat templates produce AutoProcessor warnings (non-critical).
 
-## Development Notes
-
-- Token selection is biased, not enforced - some bits may not encode correctly
-- `properly_encoded_tokens_count` tracks how many tokens matched intended bias direction
-- C-correction with c ≥ 3 generates many variants (n choose c) - can be slow
+</details>
 
 ## Contributing
 
@@ -366,14 +380,15 @@ Some models without proper chat templates produce AutoProcessor warnings (non-cr
 
 ## Citation
 
-If you use this implementation in your research, please cite the relevant academic papers and this repository.
+If you use this implementation in your research, please cite the relevant academic papers.
 
 ## Acknowledgments
 
 - Based on [LLM-Text Watermarking based on Lagrange Interpolation](https://arxiv.org/abs/2505.05712)
 - Galois field implementation optimized by Pawel Morawiecki
 - Built on HuggingFace Transformers ecosystem
+- This work was supported by the National Science Centre, Poland under grant OPUS 2023/49/B/ST6/02580.
 
 ## Disclaimer
 
-This project was developed with assistance from AI coding assistants including Claude Sonnet 4, Claude Sonnet 4.5, Claude Opus 4.5, and GPT-5. All code and documentation were reviewed and approved by a human developer, with proper oversight maintained throughout the development process.
+Portions of the code and documentation in this project were developed with the assistance of AI coding tools (Claude, GPT). All contributions were reviewed and approved by a human developer.

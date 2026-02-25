@@ -6,7 +6,7 @@ Based on: https://github.com/pawelmorawiecki/Maximum_Collinear_Points/blob/main/
 """
 
 import random
-from typing import Dict, Optional, Tuple, List
+from typing import Optional, Tuple, List
 
 class GaloisField:
     """

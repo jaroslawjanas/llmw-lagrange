@@ -7,19 +7,14 @@ This script implements the Lagrange interpolation watermarking technique for LLM
 """
 
 import hashlib
-import random
 import torch
-import numpy as np
-import time
 from itertools import combinations
-from typing import List, Tuple, Dict, Optional, Union
-from abc import ABC, abstractmethod
+from typing import List, Tuple, Dict, Optional
+from abc import ABC
 from functools import lru_cache
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    PreTrainedModel,
-    PreTrainedTokenizer,
 )
 from tqdm import tqdm
 from src.model_formatters import format_prompt_for_model
