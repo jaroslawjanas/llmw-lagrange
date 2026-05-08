@@ -39,3 +39,6 @@ $CLAUDE_ENV_FILE
 
 # VS Code
 .vscode/
+
+# Paper
+paper/
