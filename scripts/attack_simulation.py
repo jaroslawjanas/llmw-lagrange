@@ -6,12 +6,14 @@ and measures watermark recovery rate at various attack budgets.
 """
 import argparse
 import json
+import math
 import multiprocessing as mp
 import random
 import shutil
 import sys
 import time
 from datetime import datetime
+from functools import lru_cache
 from multiprocessing import cpu_count
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
@@ -28,6 +30,25 @@ import torch
 from lib import load_and_prepare_experiments
 from src.llm_watermark import LLMWatermarkDecoder, MCPSolver
 from src.pm_galois import GaloisField
+
+ATTACK_TYPES = ['insertion', 'deletion', 'substitution']
+
+# --extractor value -> extractors decoded per text
+EXTRACTOR_MODES = {'fixed': ('fixed',), 'sliding': ('sliding',), 'both': ('fixed', 'sliding')}
+
+DEFAULT_ALPHA = 0.01
+
+
+@lru_cache(maxsize=None)
+def detection_tau(num_points: int, n: int, alpha: float) -> int:
+    """Smallest tau >= 3 with C(N, tau) * 2^(-n(tau-2)) <= alpha (union bound, paper Eq. tau-choice).
+
+    Returns num_points + 1 (never reachable) when no tau meets the target.
+    """
+    for tau in range(3, num_points + 1):
+        if math.comb(num_points, tau) * 2.0 ** (-n * (tau - 2)) <= alpha:
+            return tau
+    return num_points + 1
 
 
 def get_device(no_cuda: bool) -> str:
@@ -105,6 +126,15 @@ Examples:
                         help="Disable CUDA even if available")
     parser.add_argument("-j", "--workers", type=int, default=0,
                         help="Number of worker processes (0=auto, 1=serial, default: 0)")
+    parser.add_argument("--extractor", choices=list(EXTRACTOR_MODES), default="fixed",
+                        help="Watermark extractor: 'fixed' blocks at offsets 0, n, 2n, ... (default, as in the paper), "
+                             "'sliding' a block at every token offset, or 'both' (decode once, report both). "
+                             "Plain (non-Hamming) experiments only.")
+    parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA,
+                        help="False-positive target for the detection threshold tau reported with "
+                             "--extractor sliding/both (default: 0.01)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Only simulate the first N rows per model (for quick checks)")
     return parser.parse_args()
 
 
@@ -343,7 +373,8 @@ class SimulationCache:
         """Get or create MCP solver for given n."""
         if n not in self._mcp_solvers:
             gf = self.get_gf(n)
-            self._mcp_solvers[n] = MCPSolver(gf=gf, n=n, verbose=False)
+            # Vectorized solver: same results as the reference solver, much faster for sliding windows
+            self._mcp_solvers[n] = MCPSolver(gf=gf, n=n, verbose=False, fast=True)
         return self._mcp_solvers[n]
 
     def get_decoder(self, model_name: str, secret_key: str, n: int, gf: GaloisField,
@@ -452,7 +483,9 @@ def _process_row_task(task: Dict) -> Tuple[List[Dict], Dict[str, float]]:
         budget=task['budget'],
         groups_list=task['groups_list'],
         device=device,
-        rng=rng
+        rng=rng,
+        extractor=task['extractor'],
+        alpha=task['alpha']
     )
 
     # Add metadata to results
@@ -470,6 +503,63 @@ def _process_row_task(task: Dict) -> Tuple[List[Dict], Dict[str, float]]:
 # Core Simulation
 # =============================================================================
 
+def iter_attacks(
+    generated_ids: List[int],
+    budget: int,
+    groups_list: List[int],
+    vocab_size: int,
+    min_length: int,
+    rng: random.Random,
+    timing: Optional[Dict[str, float]] = None
+):
+    """
+    Yield (num_groups, attack_type, attacked_ids) for every simulated attack on one text.
+
+    attacked_ids is None when the attack can't be applied (groups don't fit, or the
+    attacked text is shorter than min_length). The sequence of rng calls here decides
+    every attacked text, so keep it stable: reordering it changes all attacks and
+    makes results incomparable with earlier runs.
+    """
+    for num_groups in groups_list:
+        # Can't have more groups than budget
+        effective_groups = min(num_groups, budget)
+        group_sizes = split_budget(budget, effective_groups, rng)
+
+        for attack_type in ATTACK_TYPES:
+            t0 = time.perf_counter()
+
+            # Skip if no valid attack possible
+            if not group_sizes or sum(group_sizes) == 0:
+                yield num_groups, attack_type, None
+                continue
+
+            # Compute positions based on attack type
+            try:
+                if attack_type == 'insertion':
+                    # For insertion, positions are in original text (can insert at len+1 positions)
+                    positions = compute_group_positions(len(generated_ids) + 1, group_sizes, rng)
+                else:
+                    # For deletion/substitution, positions are token indices
+                    positions = compute_group_positions(len(generated_ids), group_sizes, rng)
+            except ValueError:
+                # Groups don't fit
+                yield num_groups, attack_type, None
+                continue
+
+            # Apply attack
+            if attack_type == 'insertion':
+                attacked_ids = insertion_attack(generated_ids, group_sizes, positions, vocab_size, rng)
+            elif attack_type == 'deletion':
+                attacked_ids = deletion_attack(generated_ids, group_sizes, positions, rng)
+            else:  # substitution
+                attacked_ids = substitution_attack(generated_ids, group_sizes, positions, vocab_size, rng)
+            if timing is not None:
+                timing['attack'] += time.perf_counter() - t0
+
+            # Skip if attacked list is too short
+            yield num_groups, attack_type, (attacked_ids if len(attacked_ids) >= min_length else None)
+
+
 def run_simulation_for_row(
     row: pd.Series,
     config: Dict,
@@ -477,7 +567,9 @@ def run_simulation_for_row(
     budget: int,
     groups_list: List[int],
     device: str,
-    rng: random.Random
+    rng: random.Random,
+    extractor: str = 'fixed',
+    alpha: float = DEFAULT_ALPHA
 ) -> List[Dict]:
     """
     Run attack simulation for a single data row.
@@ -490,6 +582,10 @@ def run_simulation_for_row(
         groups_list: List of group counts to test
         device: Device for decoder ('cuda' or 'cpu')
         rng: Random number generator
+        extractor: 'fixed' (original results and columns, baseline from the stored
+                   experiment), 'sliding' or 'both' (every text decoded, baseline
+                   included; per-extractor columns prefixed with the extractor name)
+        alpha: False-positive target for the detection threshold (sliding/both only)
 
     Returns:
         List of result dicts, one per (groups, attack_type) combination
@@ -532,95 +628,46 @@ def run_simulation_for_row(
     )
     cache.timing['decoder'] += time.perf_counter() - t0
 
-    vocab_size = decoder.vocab_size
-
     # Parse watermark blocks for matching calculation
     watermark_blocks = json.loads(row['watermark_blocks'])
 
-    # Baseline (groups=0): Use original stats from data (no attack)
-    baseline_recovered = bool(row['watermark_recovered'])
-    baseline_valid = int(row['unique_valid_blocks_count'])
-    baseline_matching = int(row['unique_matching_blocks_count'])
+    attacks = iter_attacks(generated_ids, budget, groups_list, decoder.vocab_size,
+                           decoder.tokens_per_block, rng, cache.timing)
 
-    attack_types = ['insertion', 'deletion', 'substitution']
+    if extractor == 'fixed':
+        # Baseline (groups=0): Use original stats from data (no attack)
+        baseline_recovered = bool(row['watermark_recovered'])
+        baseline_valid = int(row['unique_valid_blocks_count'])
+        baseline_matching = int(row['unique_matching_blocks_count'])
 
-    # Add baseline for all attack types (groups=0 means no attack)
-    for attack_type in attack_types:
-        results.append({
-            'groups': 0,
-            'attack_type': attack_type,
-            'recovered': baseline_recovered,
-            'valid_blocks': baseline_valid,
-            'matching_blocks': baseline_matching
-        })
+        # Add baseline for all attack types (groups=0 means no attack)
+        for attack_type in ATTACK_TYPES:
+            results.append({
+                'groups': 0,
+                'attack_type': attack_type,
+                'recovered': baseline_recovered,
+                'valid_blocks': baseline_valid,
+                'matching_blocks': baseline_matching
+            })
 
-    # For groups > 0: run attacks with fixed budget split into N groups
-    for num_groups in groups_list:
-        # Can't have more groups than budget
-        effective_groups = min(num_groups, budget)
-        group_sizes = split_budget(budget, effective_groups, rng)
+        for num_groups, attack_type, attacked_ids in attacks:
+            if attacked_ids is None:
+                results.append({
+                    'groups': num_groups,
+                    'attack_type': attack_type,
+                    'recovered': False,
+                    'valid_blocks': 0,
+                    'matching_blocks': 0
+                })
+                continue
 
-        for attack_type in attack_types:
+            # Decode attacked tokens (plain mode: same blocks as decode_text, from one bit pass)
             t0 = time.perf_counter()
-            attack_group_sizes = group_sizes
-
-            # Skip if no valid attack possible
-            if not attack_group_sizes or sum(attack_group_sizes) == 0:
-                results.append({
-                    'groups': num_groups,
-                    'attack_type': attack_type,
-                    'recovered': False,
-                    'valid_blocks': 0,
-                    'matching_blocks': 0
-                })
-                continue
-
-            # Compute positions based on attack type
-            try:
-                if attack_type == 'insertion':
-                    # For insertion, positions are in original text (can insert at len+1 positions)
-                    positions = compute_group_positions(len(generated_ids) + 1, attack_group_sizes, rng)
-                else:
-                    # For deletion/substitution, positions are token indices
-                    positions = compute_group_positions(len(generated_ids), attack_group_sizes, rng)
-            except ValueError:
-                # Groups don't fit
-                results.append({
-                    'groups': num_groups,
-                    'attack_type': attack_type,
-                    'recovered': False,
-                    'valid_blocks': 0,
-                    'matching_blocks': 0
-                })
-                continue
-
-            # Apply attack
-            if attack_type == 'insertion':
-                attacked_ids = insertion_attack(generated_ids, attack_group_sizes, positions, vocab_size, rng)
-            elif attack_type == 'deletion':
-                attacked_ids = deletion_attack(generated_ids, attack_group_sizes, positions, rng)
-            else:  # substitution
-                attacked_ids = substitution_attack(generated_ids, attack_group_sizes, positions, vocab_size, rng)
-            cache.timing['attack'] += time.perf_counter() - t0
-
-            # Skip if attacked list is too short
-            if len(attacked_ids) < decoder.tokens_per_block:
-                results.append({
-                    'groups': num_groups,
-                    'attack_type': attack_type,
-                    'recovered': False,
-                    'valid_blocks': 0,
-                    'matching_blocks': 0
-                })
-                continue
-
-            # Decode attacked tokens
-            t0 = time.perf_counter()
-            all_blocks, valid_blocks = decoder.decode_text(generated_ids=attacked_ids)
+            if hamming_mode != "none":
+                _, blocks_for_mcp = decoder.decode_text(generated_ids=attacked_ids)
+            else:
+                blocks_for_mcp = decoder.decode_with_extractors(attacked_ids, ('fixed',))['fixed']
             cache.timing['decode'] += time.perf_counter() - t0
-
-            # Use valid_blocks for Hamming mode, all_blocks otherwise
-            blocks_for_mcp = valid_blocks if hamming_mode != "none" else all_blocks
 
             # Verify watermark
             t0 = time.perf_counter()
@@ -630,8 +677,7 @@ def run_simulation_for_row(
                 original_a1=a1,
                 watermark_blocks=watermark_blocks
             )
-            elapsed = time.perf_counter() - t0
-            cache.timing['mcp'] += elapsed
+            cache.timing['mcp'] += time.perf_counter() - t0
 
             # Count unique valid/matching blocks
             unique_valid = len(set((b['x'], b['y']) for b in blocks_for_mcp))
@@ -645,6 +691,47 @@ def run_simulation_for_row(
                 'matching_blocks': unique_matching
             })
 
+        return results
+
+    # sliding / both: decode every text (baseline included) with each extractor
+    extractors = EXTRACTOR_MODES[extractor]
+
+    def evaluate(token_ids: List[int]) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        decoded = decoder.decode_with_extractors(token_ids, extractors)
+        cache.timing['decode'] += time.perf_counter() - t0
+        out = {}
+        for name in extractors:
+            blocks = decoded[name]
+            t0 = time.perf_counter()
+            verification = mcp_solver.verify_watermark(blocks, a0, a1, watermark_blocks)
+            cache.timing['mcp'] += time.perf_counter() - t0
+            points = set((b['x'], b['y']) for b in blocks)
+            tau = detection_tau(len(blocks), n, alpha)
+            out[f'{name}_recovered'] = verification['is_valid']
+            out[f'{name}_detected'] = verification['is_valid'] and verification['max_collinear_count'] >= tau
+            out[f'{name}_max_collinear'] = verification['max_collinear_count']
+            out[f'{name}_tau'] = tau
+            out[f'{name}_valid_blocks'] = len(points)
+            out[f'{name}_matching_blocks'] = len(set((b['x'], b['y']) for b in verification['matching_blocks']))
+            # Points on the embedded line (distinct x, so distinct points)
+            out[f'{name}_true_points'] = sum(1 for x, y in points if y == gf.add(a0, gf.multiply(a1, x)))
+        return out
+
+    failed = {}
+    for name in extractors:
+        failed.update({f'{name}_recovered': False, f'{name}_detected': False, f'{name}_max_collinear': 0,
+                       f'{name}_tau': 0, f'{name}_valid_blocks': 0, f'{name}_matching_blocks': 0,
+                       f'{name}_true_points': 0})
+
+    baseline = evaluate(generated_ids)
+    for attack_type in ATTACK_TYPES:
+        results.append({'groups': 0, 'attack_type': attack_type, **baseline})
+
+    for num_groups, attack_type, attacked_ids in attacks:
+        outcome = failed if attacked_ids is None else evaluate(attacked_ids)
+        results.append({'groups': num_groups, 'attack_type': attack_type, **outcome})
+
     return results
 
 
@@ -653,7 +740,9 @@ def run_simulation(
     perturbation_pct: int,
     groups_list: List[int],
     device: str,
-    seed: int
+    seed: int,
+    extractor: str = 'fixed',
+    alpha: float = DEFAULT_ALPHA
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """
     Run attack simulation across all models and rows.
@@ -664,6 +753,8 @@ def run_simulation(
         groups_list: List of group counts to test
         device: Device for decoder ('cuda' or 'cpu')
         seed: Random seed
+        extractor: 'fixed', 'sliding' or 'both' (see run_simulation_for_row)
+        alpha: False-positive target for the detection threshold
 
     Returns:
         Tuple of (DataFrame with simulation results, timing dict)
@@ -696,7 +787,9 @@ def run_simulation(
                 budget=budget,
                 groups_list=groups_list,
                 device=device,
-                rng=row_rng
+                rng=row_rng,
+                extractor=extractor,
+                alpha=alpha
             )
 
             # Add row metadata to results
@@ -723,7 +816,9 @@ def run_simulation_parallel(
     groups_list: List[int],
     device: str,
     seed: int,
-    num_workers: int
+    num_workers: int,
+    extractor: str = 'fixed',
+    alpha: float = DEFAULT_ALPHA
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """
     Run attack simulation in parallel across all models and rows.
@@ -735,6 +830,8 @@ def run_simulation_parallel(
         device: Device for decoder ('cuda' or 'cpu')
         seed: Random seed
         num_workers: Number of worker processes
+        extractor: 'fixed', 'sliding' or 'both' (see run_simulation_for_row)
+        alpha: False-positive target for the detection threshold
 
     Returns:
         Tuple of (DataFrame with simulation results, aggregated timing dict)
@@ -765,6 +862,8 @@ def run_simulation_parallel(
                 'row_idx': idx,
                 'generated_ids_count': generated_ids_count,
                 'seed': row_seed,
+                'extractor': extractor,
+                'alpha': alpha,
             })
 
         # Process in parallel
@@ -794,7 +893,7 @@ def run_simulation_parallel(
 
 def format_summary_report(results_df: pd.DataFrame, args, groups_list: List[int],
                           timing: dict = None, source_dirs: List[str] = None,
-                          elapsed: float = None) -> str:
+                          elapsed: float = None, extractor: Optional[str] = None) -> str:
     """Generate text summary of attack simulation results."""
     lines = []
     w = 80
@@ -802,6 +901,8 @@ def format_summary_report(results_df: pd.DataFrame, args, groups_list: List[int]
     lines.append('=' * w)
     lines.append('ATTACK SIMULATION REPORT')
     lines.append('=' * w)
+    if extractor is not None:
+        lines.append(f'Extractor: {extractor}')
     lines.append(f'Perturbation Rate: {args.perturbation_rate}%')
     lines.append(f'Groups Tested: {groups_list}')
     lines.append(f'Seed: {args.seed}')
@@ -1010,6 +1111,71 @@ def generate_combined_recovery_graph(results_df: pd.DataFrame, output_path: Path
     print(f"Saved graph: {output_path}")
 
 
+def format_extractor_comparison(results_df: pd.DataFrame, extractors: Tuple[str, ...], alpha: float) -> str:
+    """Recovery and detection rates by attack type and group count, one column per extractor."""
+    w = 80 if len(extractors) == 1 else 104
+    title = 'EXTRACTOR COMPARISON' if len(extractors) > 1 else f'{extractors[0].upper()} EXTRACTOR: RECOVERY AND DETECTION'
+    mean_tau = ', '.join(
+        f"{name} {results_df.loc[results_df[f'{name}_tau'] > 0, f'{name}_tau'].mean():.1f}" for name in extractors
+    )
+    lines = ['=' * w, title, '=' * w,
+             f'Detection = recovered and max collinear count >= tau, the smallest threshold whose',
+             f'union bound C(N, tau) * 2^(-n(tau-2)) is <= {alpha:g} for the text\'s N points (mean tau: {mean_tau})']
+
+    cols = list(extractors) + (['diff'] if len(extractors) > 1 else [])
+    for metric, heading in (('recovered', 'RECOVERY RATE (%)'), ('detected', 'DETECTION RATE (%)')):
+        lines += ['', '-' * w, heading, '-' * w]
+        lines.append(f"{'Groups':>8}" + ''.join(f" | {a.capitalize():^{9 * len(cols) - 1}}" for a in ATTACK_TYPES))
+        lines.append(f"{'':>8}" + ''.join(' | ' + ' '.join(f'{c:>8}' for c in cols) for _ in ATTACK_TYPES))
+        for g in sorted(results_df['groups'].unique()):
+            row = f"{'baseline' if g == 0 else g:>8}"
+            for attack_type in ATTACK_TYPES:
+                sel = results_df[(results_df['attack_type'] == attack_type) & (results_df['groups'] == g)]
+                rates = [100 * sel[f'{name}_{metric}'].mean() for name in extractors]
+                cells = [f'{r:7.1f}%' for r in rates]
+                if len(rates) > 1:
+                    cells.append(f'{rates[1] - rates[0]:+8.1f}')
+                row += ' | ' + ' '.join(cells)
+            lines.append(row)
+    lines += ['', '=' * w]
+    return '\n'.join(lines)
+
+
+def generate_extractor_comparison_graph(results_df: pd.DataFrame, extractors: Tuple[str, ...], metric: str,
+                                        output_path: Path, ylabel: str) -> None:
+    """Generate PNG with one subplot per attack type and one line per extractor.
+
+    Args:
+        results_df: DataFrame with per-extractor columns ('{extractor}_{metric}')
+        extractors: Extractor names to plot
+        metric: 'recovered' or 'detected'
+        output_path: Path to save the PNG file
+        ylabel: Y-axis label
+    """
+    colors = {'fixed': 'tab:blue', 'sliding': 'tab:orange'}
+    labels = {'fixed': 'Fixed blocks', 'sliding': 'Sliding window'}
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharey=True)
+    for ax, attack_type in zip(axes, ATTACK_TYPES):
+        attack_data = results_df[results_df['attack_type'] == attack_type]
+        for name in extractors:
+            rates = attack_data.groupby('groups')[f'{name}_{metric}'].mean() * 100
+            ax.plot(rates.index, rates.values, marker='o', linewidth=2, markersize=5,
+                    color=colors[name], label=labels[name])
+        ax.set_xlabel('Number of adversarial interventions', fontsize=11)
+        ax.set_title(attack_type.capitalize(), fontsize=12, fontweight='bold')
+        ax.set_ylim(0, 105)
+        ax.grid(True, alpha=0.3)
+        ax.set_xticks(sorted(attack_data['groups'].unique()))
+    axes[0].set_ylabel(ylabel, fontsize=11)
+    axes[0].legend(loc='lower left')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved graph: {output_path}")
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -1075,6 +1241,20 @@ def main():
         effective_min_tokens = min(max_tokens_values)
     validate_min_tokens_for_deletion(effective_min_tokens, args.perturbation_rate)
 
+    # Sliding extraction is for plain experiments; Hamming experiments already slide over Hamming-valid windows
+    if args.extractor != 'fixed':
+        hamming_models = [m for m, d in prepared_data.items() if d['config'].get('hamming', 'none') != 'none']
+        if hamming_models:
+            print(f"Error: --extractor {args.extractor} applies to plain experiments; "
+                  f"these use Hamming coding: {hamming_models}")
+            return 1
+    print(f"Extractor: {args.extractor}")
+
+    if args.limit is not None:
+        for model_data in prepared_data.values():
+            model_data['df'] = model_data['df'].head(args.limit)
+        print(f"Limiting to the first {args.limit} rows per model")
+
     # Run simulation (serial or parallel)
     t_start = time.perf_counter()
     if num_workers == 1:
@@ -1083,7 +1263,9 @@ def main():
             perturbation_pct=args.perturbation_rate,
             groups_list=groups_list,
             device=device,
-            seed=args.seed
+            seed=args.seed,
+            extractor=args.extractor,
+            alpha=args.alpha
         )
     else:
         results_df, timing = run_simulation_parallel(
@@ -1092,7 +1274,9 @@ def main():
             groups_list=groups_list,
             device=device,
             seed=args.seed,
-            num_workers=num_workers
+            num_workers=num_workers,
+            extractor=args.extractor,
+            alpha=args.alpha
         )
     elapsed = time.perf_counter() - t_start
     print(f"\nSimulation completed in {elapsed:.1f}s")
@@ -1122,19 +1306,47 @@ def main():
     results_df.to_csv(results_path, index=False)
     print(f"\nSaved results: {results_path}")
 
-    # Generate recovery rate graphs
-    graph_path = output_dir / "recovery_rate.png"
-    generate_recovery_graph(results_df, graph_path, args.perturbation_rate)
+    if args.extractor == 'fixed':
+        # Generate recovery rate graphs
+        graph_path = output_dir / "recovery_rate.png"
+        generate_recovery_graph(results_df, graph_path, args.perturbation_rate)
 
-    combined_graph_path = output_dir / "recovery_rate_combined.png"
-    generate_combined_recovery_graph(results_df, combined_graph_path, args.perturbation_rate)
+        combined_graph_path = output_dir / "recovery_rate_combined.png"
+        generate_combined_recovery_graph(results_df, combined_graph_path, args.perturbation_rate)
 
-    # Generate recovery rate CSV
-    recovery_csv_path = output_dir / "recovery_rate.csv"
-    generate_recovery_csv(results_df, recovery_csv_path)
+        # Generate recovery rate CSV
+        recovery_csv_path = output_dir / "recovery_rate.csv"
+        generate_recovery_csv(results_df, recovery_csv_path)
 
-    # Generate and save summary
-    summary = format_summary_report(results_df, args, groups_list, timing, all_source_dirs, elapsed)
+        # Generate summary
+        summary = format_summary_report(results_df, args, groups_list, timing, all_source_dirs, elapsed)
+    else:
+        # Per extractor: the usual graphs, CSV and report (fixed keeps the original file names)
+        extractors = EXTRACTOR_MODES[args.extractor]
+        sections = []
+        for name in extractors:
+            view = results_df.assign(recovered=results_df[f'{name}_recovered'])
+            suffix = '' if name == 'fixed' else f'_{name}'
+            generate_recovery_graph(view, output_dir / f"recovery_rate{suffix}.png", args.perturbation_rate)
+            generate_combined_recovery_graph(view, output_dir / f"recovery_rate_combined{suffix}.png",
+                                             args.perturbation_rate)
+            generate_recovery_csv(view, output_dir / f"recovery_rate{suffix}.csv")
+            first = not sections
+            sections.append(format_summary_report(view, args, groups_list,
+                                                  timing if first else None,
+                                                  all_source_dirs if first else None,
+                                                  elapsed if first else None,
+                                                  extractor=name))
+        sections.append(format_extractor_comparison(results_df, extractors, args.alpha))
+        if len(extractors) > 1:
+            generate_extractor_comparison_graph(results_df, extractors, 'recovered',
+                                                output_dir / "recovery_rate_comparison.png", 'Recovery Rate (%)')
+            generate_extractor_comparison_graph(results_df, extractors, 'detected',
+                                                output_dir / "detection_rate_comparison.png",
+                                                f'Detection Rate (%), alpha = {args.alpha:g}')
+        summary = '\n\n'.join(sections)
+
+    # Save summary
     summary_path = output_dir / "attack_summary.txt"
     summary_path.write_text(summary)
     print(f"Saved summary: {summary_path}")

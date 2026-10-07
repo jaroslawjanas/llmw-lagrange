@@ -6,7 +6,10 @@ Based on: https://github.com/pawelmorawiecki/Maximum_Collinear_Points/blob/main/
 """
 
 import random
+from functools import lru_cache
 from typing import Optional, Tuple, List
+
+import numpy as np
 
 class GaloisField:
     """
@@ -149,7 +152,27 @@ class GaloisField:
                 a ^= self.mod_poly
         
         return result & self.field_mask
-    
+
+    def multiply_array(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """
+        Element-wise multiplication of two integer arrays in GF(2^n).
+        Same shift-and-reduce steps as multiply(), vectorized with NumPy.
+
+        Args:
+            a, b: Arrays of field elements (broadcastable to the same shape)
+
+        Returns:
+            Array of products in GF(2^n)
+        """
+        a = np.array(a, dtype=np.int64, copy=True) & self.field_mask
+        b = np.asarray(b, dtype=np.int64) & self.field_mask
+        result = np.zeros(np.broadcast(a, b).shape, dtype=np.int64)
+        for bit in range(self.n):
+            result ^= np.where((b >> bit) & 1, a, 0)
+            a <<= 1
+            a ^= np.where((a >> self.n) & 1, self.mod_poly, 0)
+        return result & self.field_mask
+
     def divide(self, a: int, b: int) -> int:
         """
         Division in GF(2^n).
@@ -282,6 +305,60 @@ def max_collinear_points(points: List[Tuple[int, int]], gf: GaloisField) -> Tupl
                 best_collinear_points = [(xi, yi)] + slope_points[slope]
     
     return best_count, best_slope, best_collinear_points
+
+
+@lru_cache(maxsize=64)
+def _pair_indices(n_points: int) -> Tuple[np.ndarray, np.ndarray]:
+    """All index pairs (i, j) with i < j, ordered by i then j (the loop order of max_collinear_points)."""
+    i, j = np.triu_indices(n_points, 1)
+    return i.astype(np.int64), j.astype(np.int64)
+
+
+def max_collinear_points_fast(points: List[Tuple[int, int]], gf: GaloisField) -> Tuple[int, Optional[int], List[Tuple[int, int]]]:
+    """
+    Vectorized max_collinear_points with identical results, including ties.
+
+    The original keeps the first line that reaches a new maximum: the winning line
+    is anchored at the earliest point whose best slope reaches the global maximum,
+    and among that anchor's tied slopes it is the one first seen in j order. Points
+    sharing an x with the anchor are skipped, as in the original. Falls back to the
+    original for fields without a precomputed inverse table.
+
+    Args:
+        points: List of (x, y) tuples as integers
+        gf: GaloisField instance to use for calculations
+
+    Returns:
+        Tuple of (max_count, best_slope, collinear_points)
+    """
+    if len(points) < 2 or gf.inv_table is None:
+        return max_collinear_points(points, gf)
+
+    pts = np.asarray(points, dtype=np.int64).reshape(-1, 2)
+    xs, ys = pts[:, 0], pts[:, 1]
+    i, j = _pair_indices(len(pts))
+    dx = xs[i] ^ xs[j]
+    keep = dx != 0  # vertical pairs are skipped
+    if not keep.any():
+        return 1, None, []
+    i, j, dx = i[keep], j[keep], dx[keep]
+
+    inv = np.asarray(gf.inv_table, dtype=np.int64)
+    slope = gf.multiply_array(ys[i] ^ ys[j], inv[dx])
+
+    # Count pairs per (anchor, slope); first occurrence = smallest j for that slope
+    q = gf.field_size
+    keys, first, counts = np.unique(i * q + slope, return_index=True, return_counts=True)
+    best = counts.max()
+    candidates = np.flatnonzero(counts == best)
+    anchors = keys[candidates] // q
+    candidates = candidates[anchors == anchors.min()]
+    winner = candidates[np.argmin(first[candidates])]
+    anchor, best_slope = int(keys[winner] // q), int(keys[winner] % q)
+
+    members = j[(i == anchor) & (slope == best_slope)]
+    collinear = [(int(xs[anchor]), int(ys[anchor]))] + [(int(xs[m]), int(ys[m])) for m in members]
+    return int(best) + 1, best_slope, collinear
 
 
 def recover_line_equation(collinear_points: List[Tuple[int, int]], gf: GaloisField) -> Tuple[int, int]:

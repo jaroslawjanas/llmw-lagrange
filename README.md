@@ -260,6 +260,7 @@ python attack_simulation.py                          # Default 10% perturbation
 python attack_simulation.py --perturbation-rate 20   # 20% max perturbation
 python attack_simulation.py --groups "1,2,3,4,5"     # Test different group counts
 python attack_simulation.py -j 4                     # Use 4 worker processes
+python attack_simulation.py --extractor both         # Compare fixed-block and sliding-window extraction
 ```
 
 Simulates three attack types:

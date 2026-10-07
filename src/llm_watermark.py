@@ -7,9 +7,10 @@ This script implements the Lagrange interpolation watermarking technique for LLM
 """
 
 import hashlib
+import numpy as np
 import torch
 from itertools import combinations
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Sequence
 from abc import ABC
 from functools import lru_cache
 from transformers import (
@@ -19,7 +20,7 @@ from transformers import (
 from tqdm import tqdm
 from src.model_formatters import format_prompt_for_model
 from src.utils import load_hf_token
-from src.pm_galois import GaloisField, max_collinear_points, recover_line_equation
+from src.pm_galois import GaloisField, max_collinear_points, max_collinear_points_fast, recover_line_equation
 from src.hamming import HammingCode
 import src.paths as paths
 
@@ -55,6 +56,22 @@ def _compute_vocab_split(
     split = int(vocab_size * green_list_fraction)
 
     return perm[:split], perm[split:]
+
+
+@lru_cache(maxsize=2048)
+def _compute_green_mask(
+    token_id: int, secret_key: str, vocab_size: int, green_list_fraction: float, device: str
+) -> np.ndarray:
+    """
+    Boolean green-list mask on the CPU for the vocab split after token_id.
+
+    Same split as _compute_vocab_split (same device caveat), but lets the decoder
+    test membership without a GPU round trip per token.
+    """
+    green, _ = _compute_vocab_split(token_id, secret_key, vocab_size, green_list_fraction, device)
+    mask = np.zeros(vocab_size, dtype=bool)
+    mask[green.cpu().numpy()] = True
+    return mask
 
 
 class LLMWatermarkerBase(ABC):
@@ -663,6 +680,8 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
     Reverses the encoding process to extract x-coordinates and y-bit sequences.
     """
 
+    EXTRACTORS = ("fixed", "sliding")
+
     def __init__(
         self,
         model_name: str,
@@ -677,6 +696,7 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         hamming_mode: str = "none",
         correct: bool = False,
         c_correction: int = 0,
+        extractor: str = "fixed",
     ):
         """
         Initialize the decoder with the same parameters used for encoding.
@@ -694,9 +714,20 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             hamming_mode: Hamming code mode ("none", "standard", "secded")
             correct: Whether to enable Hamming error correction (False = detection-only)
             c_correction: Max Hamming distance for variation generation (0 = disabled)
+            extractor: "fixed" reads blocks at offsets 0, n, 2n, ...; "sliding" reads a
+                candidate block at every token offset (plain mode only)
         """
+        if extractor not in self.EXTRACTORS:
+            raise ValueError(f"extractor must be one of {self.EXTRACTORS}, got '{extractor}'")
+        if extractor == "sliding" and hamming_mode != "none":
+            raise ValueError("extractor='sliding' is for plain mode; Hamming mode already slides over Hamming-valid windows")
+        if extractor == "sliding" and c_correction > 0:
+            raise ValueError("extractor='sliding' cannot be combined with c_correction > 0")
+
         # Initialize base class (loads tokenizer)
         super().__init__(model_name, secret_key, n, gf, device, green_list_fraction, seed, cache_dir, verbose)
+
+        self.extractor = extractor
 
         # Hamming code setup
         self.hamming_mode = hamming_mode
@@ -745,8 +776,52 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
             all_blocks, _ = self._decode_fixed_blocks(token_ids)
             expanded_blocks = self._apply_c_correction(all_blocks)
             return expanded_blocks, expanded_blocks
+        elif self.extractor == "sliding":
+            blocks = self.decode_with_extractors(token_ids, ("sliding",))["sliding"]
+            return blocks, blocks
         else:
             return self._decode_fixed_blocks(token_ids)
+
+    def decode_with_extractors(self, token_ids: List[int], extractors: Sequence[str]) -> Dict[str, List[Dict]]:
+        """
+        Decode plain (non-Hamming) blocks for several extractors from one pass over the tokens.
+
+        Both extractors read the same green/red bit stream:
+          - "fixed":   blocks at offsets 0, n, 2n, ... (same blocks as _decode_fixed_blocks)
+          - "sliding": a block at every offset 0 .. len - n
+
+        Each block's x is hashed from the token before it (token ID 0 before offset 0).
+
+        Args:
+            token_ids: List of token IDs to decode
+            extractors: Extractor names to decode, any of EXTRACTORS
+
+        Returns:
+            Dict mapping extractor name to its list of blocks (same block format as decode_text)
+        """
+        unknown = set(extractors) - set(self.EXTRACTORS)
+        if unknown:
+            raise ValueError(f"Unknown extractor(s): {sorted(unknown)}")
+
+        bits = self._decode_tokens_to_bits(token_ids)
+        x_cache: Dict[int, int] = {}
+
+        def block_at(offset: int) -> Dict:
+            prev_token = 0 if offset == 0 else token_ids[offset - 1]
+            if prev_token not in x_cache:
+                x_cache[prev_token] = self._hash_to_x(prev_token, self.secret_key)
+            y_bits = bits[offset:offset + self.n]
+            return {'x': int(x_cache[prev_token]), 'y': self._binary_to_int(y_bits), 'y_bits': y_bits, 'p_bits': []}
+
+        decoded = {}
+        for name in extractors:
+            if name == "fixed":
+                num_blocks = len(token_ids) // self.n
+                offsets = range(0, num_blocks * self.n, self.n) if num_blocks > 1 else []
+            else:
+                offsets = range(0, len(token_ids) - self.n + 1)
+            decoded[name] = [block_at(o) for o in offsets]
+        return decoded
 
     def _decode_tokens_to_bits(self, token_ids: List[int]) -> List[int]:
         """
@@ -762,8 +837,10 @@ class LLMWatermarkDecoder(LLMWatermarkerBase):
         for i, token_id in enumerate(token_ids):
             # Previous token for vocab split (0 for first token)
             prev_token = 0 if i == 0 else token_ids[i - 1]
-            green_tokens, _ = self._get_red_green_tokens(prev_token)
-            is_green = (green_tokens == token_id).any().item()
+            green_mask = _compute_green_mask(
+                prev_token, self.secret_key, self.vocab_size, self.green_list_fraction, self.device
+            )
+            is_green = 0 <= token_id < len(green_mask) and green_mask[token_id]
             all_bits.append(1 if is_green else 0)
         return all_bits
 
@@ -964,7 +1041,7 @@ class MCPSolver:
     setup we simply modified this function to use a faster (Pawel's) implementation.
     """
     
-    def __init__(self, gf: GaloisField, n: int, verbose: bool = False):
+    def __init__(self, gf: GaloisField, n: int, verbose: bool = False, fast: bool = False):
         """
         Initialize the MCP solver.
 
@@ -972,10 +1049,13 @@ class MCPSolver:
             gf: GaloisField instance for GF(2^n) arithmetic
             n: Field size parameter
             verbose: Whether to show detailed output
+            fast: Use the vectorized solver (identical results, much faster on large point sets).
+                  Off by default so runtime benchmarks keep measuring the reference solver.
         """
         self.gf = gf
         self.n = n
         self.verbose = verbose
+        self.fast = fast
     
     def solve_mcp(self, points: List[Tuple[int, int]]) -> Tuple[int, int, List[Tuple[int, int]]]:
         """
@@ -993,8 +1073,8 @@ class MCPSolver:
         if len(points) < 2:
             return 0, None, []
 
-        # Use the new framework's max_collinear_points function
-        max_count, best_slope, collinear_points = max_collinear_points(points, self.gf)
+        solver = max_collinear_points_fast if self.fast else max_collinear_points
+        max_count, best_slope, collinear_points = solver(points, self.gf)
         
         if self.verbose:
             print(f"Found maximum {max_count} collinear points with slope {best_slope}")
